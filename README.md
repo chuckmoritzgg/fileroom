@@ -195,6 +195,12 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 - Map tiles provided by OpenStreetMap contributors
 - Icons from Bootstrap Icons
 
+## Inspired by
+
+- [pairdrop](https://github.com/schlagmichdoch/pairdrop)
+- [aqross](https://aqross.app)
+- instant messagers
+
 ## Support
 
 For issues, questions, or suggestions, please open an issue on GitHub.
