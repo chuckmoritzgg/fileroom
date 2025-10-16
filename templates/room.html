@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="de" data-theme="light">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <title>Chat 2 Go - {{ room_code }}</title>
+
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/styles.css">
+
+    <!-- Leaflet for maps -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+</head>
+
+<body>
+    <!-- Image Preview Modal -->
+    <div class="image-modal" id="imageModal">
+        <div class="image-modal-backdrop" onclick="closeImageModal()"></div>
+        <div class="image-modal-content">
+            <div class="image-modal-header">
+                <span id="imageModalTitle">Image Preview</span>
+                <div>
+                    <button class="btn-modal-download" id="imageModalDownload">
+                        <i class="bi bi-download"></i>
+                    </button>
+                    <button class="btn-modal-close" onclick="closeImageModal()">
+                        <i class="bi bi-x-lg"></i>
+                    </button>
+                </div>
+            </div>
+            <div class="image-modal-body">
+                <img id="imageModalImg" src="" alt="">
+            </div>
+        </div>
+    </div>
+
+    <!-- QR Code Modal -->
+    <div class="qr-modal" id="qrModal">
+        <div class="qr-modal-content">
+            <div class="qr-modal-header">
+                <h5><i class="bi bi-qr-code me-2"></i>Share Room</h5>
+                <button class="btn-close-modal" onclick="closeQR()">
+                    <i class="bi bi-x-lg"></i>
+                </button>
+            </div>
+            <div class="qr-modal-body">
+                {% if qr_code %}
+                <img src="{{ qr_code }}" class="qr-image" alt="QR Code">
+                {% endif %}
+                <div class="room-code-display">{{ room_code }}</div>
+                <div class="share-url">
+                    <input type="text" id="shareUrl" value="{{ base_url }}/room/{{ room_code }}" readonly>
+                    <button onclick="copyShareUrl()" class="btn-copy">
+                        <i class="bi bi-clipboard"></i>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="chat-container">
+        <!-- Sidebar -->
+        <div class="sidebar" id="sidebar">
+            <div class="sidebar-header">
+                <h6><i class="bi bi-people me-2"></i>Users</h6>
+                <button class="btn-close-sidebar" onclick="toggleSidebar()">
+                    <i class="bi bi-x-lg"></i>
+                </button>
+            </div>
+
+            <div class="user-list" id="usersList">
+                <div class="text-muted small">Loading...</div>
+            </div>
+
+            <div class="sidebar-footer">
+                <button class="btn btn-sm btn-outline-primary w-100 mb-2" onclick="changeName()">
+                    <i class="bi bi-pencil me-1"></i>Change Name
+                </button>
+
+                <button class="btn btn-sm btn-outline-secondary w-100 mb-2" onclick="toggleTheme()">
+                    <i class="bi bi-moon-fill me-1" id="themeIcon"></i>
+                    <span id="themeText">Dark Mode</span>
+                </button>
+
+                <div class="text-center">
+                    <small class="text-muted">Room: <strong>{{ room_code }}</strong></small>
+                </div>
+            </div>
+        </div>
+
+        <!-- Main Chat -->
+        <div class="main-chat">
+            <div class="chat-header">
+                <button class="btn-menu" onclick="toggleSidebar()">
+                    <i class="bi bi-list"></i>
+                </button>
+
+                <div class="header-info">
+                    <h5 class="mb-0">Chat 2 Go: {{ room_code }}</h5>
+                </div>
+
+                <button class="btn-qr" onclick="openQR()">
+                    <i class="bi bi-qr-code"></i>
+                </button>
+            </div>
+
+            <div class="messages-container" id="messagesContainer">
+                {% for msg in messages %}
+                    {% if msg.type == 'text' %}
+                    <div class="message text" id="msg-{{ msg.id }}">
+                        <div class="message-header">
+                            {{ msg.username }}
+                            <span class="message-time">
+                                {{ msg.time }}
+                                <div class="circular-timer" data-seconds="{{ msg.time_remaining }}">
+                                    <svg class="timer-circle">
+                                        <circle class="timer-track"></circle>
+                                        <circle class="timer-progress"></circle>
+                                    </svg>
+                                    <span class="timer-text">{{ msg.time_remaining }}s</span>
+                                </div>
+                            </span>
+                        </div>
+                        <div class="message-content">{{ msg.text }}</div>
+                        {% if msg.links %}
+                        <div class="link-previews">
+                            {% for link in msg.links %}
+                            <div class="link-preview">
+                                <i class="bi bi-link-45deg"></i>
+                                <a href="{{ link }}" target="_blank" rel="noopener">{{ link }}</a>
+                            </div>
+                            {% endfor %}
+                        </div>
+                        {% endif %}
+                        <div class="message-footer">
+                            <button class="btn-delete" onclick="deleteMessage('{{ msg.id }}')">
+                                <i class="bi bi-trash"></i>
+                            </button>
+                        </div>
+                    </div>
+                    {% elif msg.type == 'location' %}
+                    <div class="message location" id="msg-{{ msg.id }}">
+                        <div class="message-header">
+                            {{ msg.username }}
+                            <span class="message-time">
+                                {{ msg.time }}
+                                <div class="circular-timer" data-seconds="{{ msg.time_remaining }}">
+                                    <svg class="timer-circle">
+                                        <circle class="timer-track"></circle>
+                                        <circle class="timer-progress"></circle>
+                                    </svg>
+                                    <span class="timer-text">{{ msg.time_remaining }}s</span>
+                                </div>
+                            </span>
+                        </div>
+                        <div class="location-preview" id="map-{{ msg.id }}" data-lat="{{ msg.latitude }}" data-lng="{{ msg.longitude }}"></div>
+                        <div class="location-link">
+                            <a href="https://www.openstreetmap.org/?mlat={{ msg.latitude }}&mlon={{ msg.longitude }}#map=15/{{ msg.latitude }}/{{ msg.longitude }}" target="_blank">
+                                <i class="bi bi-geo-alt-fill me-1"></i>Open in Map
+                            </a>
+                        </div>
+                        <div class="message-footer">
+                            <button class="btn-delete" onclick="deleteMessage('{{ msg.id }}')">
+                                <i class="bi bi-trash"></i>
+                            </button>
+                        </div>
+                    </div>
+                    {% elif msg.type == 'image' %}
+                    <div class="message image" id="msg-{{ msg.id }}">
+                        <div class="message-header">
+                            {{ msg.username }}
+                            <span class="message-time">
+                                {{ msg.time }}
+                                <div class="circular-timer" data-seconds="{{ msg.time_remaining }}">
+                                    <svg class="timer-circle">
+                                        <circle class="timer-track"></circle>
+                                        <circle class="timer-progress"></circle>
+                                    </svg>
+                                    <span class="timer-text">{{ msg.time_remaining }}s</span>
+                                </div>
+                            </span>
+                        </div>
+                        <div class="image-preview" onclick="openImageModal('/api/download/{{ msg.id }}', '{{ msg.filename }}')">
+                            <img src="/api/download/{{ msg.id }}" alt="{{ msg.filename }}" loading="lazy">
+                            <div class="image-overlay">
+                                <i class="bi bi-arrows-fullscreen"></i>
+                                <span>Click to view</span>
+                            </div>
+                        </div>
+                        <div class="message-footer">
+                            <button class="btn-delete" onclick="deleteMessage('{{ msg.id }}')">
+                                <i class="bi bi-trash"></i>
+                            </button>
+                        </div>
+                    </div>
+                    {% elif msg.type == 'voice' %}
+                    <div class="message voice" id="msg-{{ msg.id }}">
+                        <div class="message-header">
+                            {{ msg.username }}
+                            <span class="message-time">
+                                {{ msg.time }}
+                                <div class="circular-timer" data-seconds="{{ msg.time_remaining }}">
+                                    <svg class="timer-circle">
+                                        <circle class="timer-track"></circle>
+                                        <circle class="timer-progress"></circle>
+                                    </svg>
+                                    <span class="timer-text">{{ msg.time_remaining }}s</span>
+                                </div>
+                            </span>
+                        </div>
+                        <div class="voice-player" data-src="/api/download/{{ msg.id }}">
+                            <button class="voice-play-btn">
+                                <i class="bi bi-play-fill"></i>
+                            </button>
+                            <div class="voice-progress">
+                                <div class="voice-waveform">
+                                    <div class="wave-bar"></div>
+                                    <div class="wave-bar"></div>
+                                    <div class="wave-bar"></div>
+                                    <div class="wave-bar"></div>
+                                    <div class="wave-bar"></div>
+                                </div>
+                                <div class="voice-time">0:00</div>
+                            </div>
+                            <button class="voice-download-btn" onclick="downloadFile('/api/download/{{ msg.id }}', '{{ msg.filename }}')">
+                                <i class="bi bi-download"></i>
+                            </button>
+                        </div>
+                        <div class="message-footer">
+                            <button class="btn-delete" onclick="deleteMessage('{{ msg.id }}')">
+                                <i class="bi bi-trash"></i>
+                            </button>
+                        </div>
+                    </div>
+                    {% else %}
+                    <div class="message file" id="msg-{{ msg.id }}">
+                        <div class="message-header">
+                            {{ msg.username }}
+                            <span class="message-time">
+                                {{ msg.time }}
+                                <div class="circular-timer" data-seconds="{{ msg.time_remaining }}">
+                                    <svg class="timer-circle">
+                                        <circle class="timer-track"></circle>
+                                        <circle class="timer-progress"></circle>
+                                    </svg>
+                                    <span class="timer-text">{{ msg.time_remaining }}s</span>
+                                </div>
+                            </span>
+                        </div>
+                        <div class="file-info">
+                            <i class="bi bi-file-earmark file-icon"></i>
+                            <div class="flex-grow-1">
+                                <div class="fw-semibold">{{ msg.filename }}</div>
+                                <small>{{ msg.size_mb }} MB</small>
+                            </div>
+                            <a href="/api/download/{{ msg.id }}" class="btn-download">
+                                <i class="bi bi-download"></i>
+                            </a>
+                        </div>
+                        <div class="message-footer">
+                            <button class="btn-delete" onclick="deleteMessage('{{ msg.id }}')">
+                                <i class="bi bi-trash"></i>
+                            </button>
+                        </div>
+                    </div>
+                    {% endif %}
+                {% endfor %}
+            </div>
+
+            <!-- Input Area -->
+            <div class="input-area">
+                <!-- Hidden file inputs -->
+                <input type="file" id="fileInput" multiple style="display:none;" accept="*/*">
+                <input type="file" id="photoInput" accept="image/*" capture="environment" style="display:none;">
+
+                <!-- Attach Menu -->
+                <div class="attach-menu" id="attachMenu">
+                    <button onclick="selectAttachment('file')">
+                        <i class="bi bi-file-earmark"></i>
+                        <span>File</span>
+                    </button>
+                    <button onclick="selectAttachment('photo')">
+                        <i class="bi bi-camera"></i>
+                        <span>Photo</span>
+                    </button>
+                    <button onclick="sendLocation()">
+                        <i class="bi bi-geo-alt"></i>
+                        <span>Location</span>
+                    </button>
+                </div>
+
+                <div class="input-wrapper">
+                    <button class="btn-attach" onclick="toggleAttachMenu()" title="Attach">
+                        <i class="bi bi-plus-lg"></i>
+                    </button>
+
+                    <input type="text" class="message-input" id="messageInput" 
+                           placeholder="Type a message..." 
+                           onkeypress="if(event.key==='Enter') sendMessage()">
+
+                    <button class="btn-voice" id="voiceBtn" 
+                            onpointerdown="startRecording(event)" 
+                            onpointerup="stopRecording(event)" 
+                            onpointercancel="stopRecording(event)"
+                            title="Hold to record">
+                        <i class="bi bi-mic-fill"></i>
+                    </button>
+
+                    <button class="btn-send" onclick="sendMessage()" title="Send">
+                        <i class="bi bi-send-fill"></i>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Recording Indicator -->
+    <div class="recording-indicator" id="recordingIndicator">
+        <i class="bi bi-mic-fill"></i>
+        Recording... <span id="recordingTime">0:00</span>
+    </div>
+
+    <div class="toast-container position-fixed top-0 end-0 p-3"></div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="/static/js/app.js"></script>
+</body>
+</html>

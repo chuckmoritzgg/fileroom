@@ -1,0 +1,13 @@
+version: '3.8'
+services:
+  fileroom:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - type: tmpfs
+        target: /app/uploads
+        tmpfs:
+          size: 2G
+          mode: 0777
+    restart: unless-stopped
