@@ -199,7 +199,7 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 - [pairdrop](https://github.com/schlagmichdoch/pairdrop)
 - [aqross](https://aqross.app)
-- instant messagers
+- instant messengers
 
 ## Support
 
