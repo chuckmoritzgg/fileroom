@@ -688,5 +688,52 @@ async def manifest():
         "theme_color": "#2563eb"
     }
 
+@app.delete("/api/room/{room_code}/all")
+async def delete_all_room_data(room_code: str):
+    """Delete all messages and files in a room"""
+    try:
+        room_code = room_code.upper()
+        
+        if room_code not in rooms_db:
+            raise HTTPException(status_code=404, detail="Room not found")
+        
+        deleted_count = 0
+        
+        # Get all message IDs for this room
+        message_ids = list(rooms_db[room_code]['messages'])
+        
+        # Delete all messages and their files
+        for message_id in message_ids:
+            if message_id in messages_db:
+                msg = messages_db[message_id]
+                
+                # Delete file if it exists
+                if msg['type'] in ['file', 'image', 'voice']:
+                    file_path = UPLOAD_DIR / msg['filename']
+                    if file_path.exists():
+                        file_path.unlink()
+                
+                # Remove from messages_db
+                del messages_db[message_id]
+                deleted_count += 1
+        
+        # Clear the room's message list
+        rooms_db[room_code]['messages'] = []
+        
+        # Broadcast room cleared event
+        await broadcast_to_room(room_code, {
+            'type': 'room_cleared',
+            'message': 'All messages deleted'
+        })
+        
+        return {"success": True, "message": f"Deleted {deleted_count} messages", "count": deleted_count}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Delete all error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)

@@ -29,6 +29,8 @@ document.addEventListener('DOMContentLoaded', function() {
     setupUI();
     scrollToBottom();
     initializeMaps();
+    setupDragAndDrop();
+
 
     // Heartbeat
     setInterval(() => {
@@ -175,8 +177,93 @@ function handleWebSocketMessage(data) {
             }
             refreshData();
             break;
+
+        case 'room_cleared':
+            const container = document.getElementById('messagesContainer');
+            if (container) {
+                container.innerHTML = '';
+            }
+            Object.keys(audioPlayers).forEach(id => {
+                audioPlayers[id].pause();
+            });
+            audioPlayers = {};
+            showToast('Room cleared by another user', 'info');
+            break;
     }
 }
+
+// Drag and Drop setup
+function setupDragAndDrop() {
+    const mainChat = document.querySelector('.main-chat');
+    if (!mainChat) return;
+
+    let dragCounter = 0;
+
+    // Prevent default drag behaviors on the whole document
+    ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
+        document.body.addEventListener(eventName, preventDefaults, false);
+    });
+
+    function preventDefaults(e) {
+        e.preventDefault();
+        e.stopPropagation();
+    }
+
+    // Highlight drop area when item is dragged over it
+    document.body.addEventListener('dragenter', function(e) {
+        dragCounter++;
+        if (e.dataTransfer.types.includes('Files')) {
+            mainChat.classList.add('drag-over');
+        }
+    }, false);
+
+    document.body.addEventListener('dragleave', function(e) {
+        dragCounter--;
+        if (dragCounter === 0) {
+            mainChat.classList.remove('drag-over');
+        }
+    }, false);
+
+    document.body.addEventListener('dragover', function(e) {
+        if (e.dataTransfer.types.includes('Files')) {
+            e.dataTransfer.dropEffect = 'copy';
+        }
+    }, false);
+
+    // Handle dropped files
+    document.body.addEventListener('drop', function(e) {
+        dragCounter = 0;
+        mainChat.classList.remove('drag-over');
+        
+        const files = Array.from(e.dataTransfer.files);
+        if (files.length > 0) {
+            handleDroppedFiles(files);
+        }
+    }, false);
+}
+
+function handleDroppedFiles(files) {
+    if (!files || files.length === 0) return;
+    
+    console.log(`Dropped ${files.length} files`);
+    
+    // Separate images from other files
+    const imageFiles = files.filter(f => f.type.startsWith('image/'));
+    const otherFiles = files.filter(f => !f.type.startsWith('image/'));
+    
+    // Upload images as 'image' type
+    if (imageFiles.length > 0) {
+        console.log(`Uploading ${imageFiles.length} images`);
+        uploadFiles(imageFiles, 'image');
+    }
+    
+    // Upload other files as 'file' type
+    if (otherFiles.length > 0) {
+        console.log(`Uploading ${otherFiles.length} files`);
+        uploadFiles(otherFiles, 'file');
+    }
+}
+
 
 // UI Setup
 function setupUI() {
@@ -438,7 +525,7 @@ async function sendLocation() {
 
 // Delete message
 async function deleteMessage(messageId) {
-    if (!confirm('Delete this message?')) return;
+    // if (!confirm('Delete this message?')) return;
 
     try {
         const response = await fetch(`/api/message/${messageId}`, {
@@ -581,7 +668,9 @@ function addMessageToUI(msg) {
             <div class="file-info">
                 <i class="bi bi-file-earmark file-icon"></i>
                 <div class="flex-grow-1">
-                    <div class="fw-semibold">${escapeHtml(msg.filename)}</div>
+                    <div class="fw-semibold" onclick="downloadFile('/api/download/${msg.id}', '${escapeHtml(msg.filename)}')" style="cursor: pointer;">
+                        ${escapeHtml(msg.filename)}
+                    </div>
                     <small>${msg.size_mb} MB</small>
                 </div>
                 <a href="/api/download/${msg.id}" class="btn-download">
@@ -924,6 +1013,99 @@ function changeName() {
         showToast('Name updated', 'success');
     });
 }
+
+// Delete all messages and files in the room
+async function deleteAllRoomData() {
+    if (!currentUser) {
+        showToast('User not initialized', 'warning');
+        return;
+    }
+    
+    const confirmMsg = 'Are you sure you want to delete ALL messages and files in this room? This cannot be undone!';
+    if (!confirm(confirmMsg)) return;
+    
+    try {
+        showToast('Deleting all data...', 'info');
+        
+        const response = await fetch(`/api/room/${roomCode}/all`, {
+            method: 'DELETE'
+        });
+        
+        if (!response.ok) {
+            throw new Error('Delete all failed');
+        }
+        
+        const result = await response.json();
+        
+        // Clear the messages container
+        const container = document.getElementById('messagesContainer');
+        if (container) {
+            container.innerHTML = '';
+        }
+        
+        // Stop all audio players
+        Object.keys(audioPlayers).forEach(id => {
+            audioPlayers[id].pause();
+        });
+        audioPlayers = {};
+        
+        showToast(`Deleted ${result.count} messages`, 'success');
+        
+    } catch (error) {
+        console.error('Delete all error:', error);
+        showToast('Failed to delete all data', 'danger');
+    }
+}
+
+
+// Download all files from the room
+async function downloadAllFiles() {
+    const fileMessages = document.querySelectorAll('.message.file, .message.image, .message.voice');
+    
+    if (fileMessages.length === 0) {
+        showToast('No files to download', 'info');
+        return;
+    }
+    
+    showToast(`Downloading ${fileMessages.length} file(s)...`, 'info');
+    
+    const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+    let downloadCount = 0;
+    
+    for (const msgEl of fileMessages) {
+        try {
+            const fileInfo = msgEl.querySelector('.file-info');
+            const filename = fileInfo ? fileInfo.querySelector('.fw-semibold').textContent : 'file';
+            const downloadLink = msgEl.querySelector('.btn-download, [onclick*="downloadFile"]');
+            
+            if (downloadLink) {
+                let downloadUrl = null;
+                const href = downloadLink.getAttribute('href');
+                const onclick = downloadLink.getAttribute('onclick');
+                
+                if (href) {
+                    downloadUrl = href;
+                } else if (onclick && onclick.includes('downloadFile')) {
+                    const match = onclick.match(/'([^']+)'/);
+                    if (match) {
+                        downloadUrl = match[1];
+                    }
+                }
+                
+                if (downloadUrl) {
+                    downloadFile(downloadUrl, filename);
+                    downloadCount++;
+                    await delay(200);
+                }
+            }
+        } catch (error) {
+            console.error('Download error:', error);
+        }
+    }
+    
+    showToast(`Started downloading ${downloadCount} file(s)`, 'success');
+}
+
 
 // Utilities
 function formatTime(seconds) {

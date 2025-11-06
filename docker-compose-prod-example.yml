@@ -4,12 +4,19 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    ports:
-      - "8181:8000"
+    # ports:
+    #   - "8181:8000"
     volumes:
       - type: tmpfs
         target: /app/uploads
         tmpfs:
-          size: 2G
+          size: 200M
           mode: 0777
     restart: unless-stopped
+    networks:
+      - fileroom_network
+
+networks:
+  fileroom_network:
+    driver: bridge
+    external: true

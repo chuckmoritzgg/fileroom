@@ -1,27 +1,7 @@
 /* FileRoom Perfect CSS - Enhanced UX with circular timers and media previews */
 
 :root {
-    --primary: #2563eb;
-    --primary-hover: #1d4ed8;
-    --success: #10b981;
-    --danger: #ef4444;
-    --warning: #f59e0b;
-
-    /* Light theme */
-    --bg-gradient: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-    --bg-main: #ffffff;
-    --bg-sidebar: #f9fafb;
-    --bg-message: #f3f4f6;
-    --bg-message-alt: #dbeafe;
-    --text-primary: #111827;
-    --text-secondary: #6b7280;
-    --text-muted: #9ca3af;
-    --border-color: #e5e7eb;
-    --shadow: rgba(0, 0, 0, 0.1);
-    --overlay: rgba(0, 0, 0, 0.8);
-}
-
-[data-theme="dark"] {
+    /* Dark theme (always enabled) */
     --bg-gradient: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
     --bg-main: #1e293b;
     --bg-sidebar: #0f172a;
@@ -33,6 +13,12 @@
     --border-color: #475569;
     --shadow: rgba(0, 0, 0, 0.3);
     --overlay: rgba(0, 0, 0, 0.9);
+    
+    --primary: #2563eb;
+    --primary-hover: #1d4ed8;
+    --success: #10b981;
+    --danger: #ef4444;
+    --warning: #f59e0b;
 }
 
 * {
@@ -641,6 +627,16 @@ body {
     margin: 0.25rem 0;
 }
 
+.file-info .fw-semibold {
+    cursor: pointer;
+    transition: color 0.2s;
+}
+
+.file-info .fw-semibold:hover {
+    color: var(--primary);
+    text-decoration: underline;
+}
+
 .file-icon {
     font-size: 1.5rem;
 }
@@ -692,6 +688,45 @@ body {
     padding: 0.75rem;
     padding-bottom: calc(0.75rem + env(safe-area-inset-bottom, 0px));
 }
+
+/* Drag and Drop Zone */
+.input-area.drag-over {
+    background: var(--bg-message-alt);
+    border-color: var(--primary);
+}
+
+.main-chat.drag-over::before {
+    content: 'Drop files here';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(37, 99, 235, 0.9);
+    color: white;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 2rem;
+    font-weight: 600;
+    z-index: 1000;
+    pointer-events: none;
+}
+
+.drop-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(37, 99, 235, 0.9);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 2000;
+    pointer-events: none;
+}
+
 
 .input-wrapper {
     display: flex;
