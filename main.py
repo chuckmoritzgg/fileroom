@@ -680,7 +680,18 @@ async def favicon():
 @app.get("/manifest.json")
 async def manifest(request: Request):
     """PWA Manifest with Share Target API"""
-    base_url = str(request.base_url).rstrip('/')
+    # Get base URL and ensure HTTPS when appropriate
+    baseurl = str(request.base_url).rstrip("/")
+    
+    # If X-Forwarded-Proto header exists (reverse proxy like Nginx), use it
+    if forwarded_proto := request.headers.get("X-Forwarded-Proto"):
+        # Replace the scheme in baseurl with the forwarded protocol
+        if baseurl.startswith("http://"):
+            baseurl = baseurl.replace("http://", f"{forwarded_proto}://")
+        elif baseurl.startswith("https://"):
+            if forwarded_proto == "http":
+                # Only replace if explicitly set to http
+                baseurl = baseurl.replace("https://", "http://")
     
     return {
         "name": "FileRoom - Ephemeral File Sharing",
@@ -694,49 +705,49 @@ async def manifest(request: Request):
         "scope": "/",
         "icons": [
             {
-                "src": f"{base_url}/static/icons/icon-72x72.png",
+                "src": f"{baseurl}/static/icons/icon-72x72.png",
                 "sizes": "72x72",
                 "type": "image/png",
                 "purpose": "any"
             },
             {
-                "src": f"{base_url}/static/icons/icon-96x96.png",
+                "src": f"{baseurl}/static/icons/icon-96x96.png",
                 "sizes": "96x96",
                 "type": "image/png",
                 "purpose": "any"
             },
             {
-                "src": f"{base_url}/static/icons/icon-128x128.png",
+                "src": f"{baseurl}/static/icons/icon-128x128.png",
                 "sizes": "128x128",
                 "type": "image/png",
                 "purpose": "any"
             },
             {
-                "src": f"{base_url}/static/icons/icon-144x144.png",
+                "src": f"{baseurl}/static/icons/icon-144x144.png",
                 "sizes": "144x144",
                 "type": "image/png",
                 "purpose": "any"
             },
             {
-                "src": f"{base_url}/static/icons/icon-152x152.png",
+                "src": f"{baseurl}/static/icons/icon-152x152.png",
                 "sizes": "152x152",
                 "type": "image/png",
                 "purpose": "any"
             },
             {
-                "src": f"{base_url}/static/icons/icon-192x192.png",
+                "src": f"{baseurl}/static/icons/icon-192x192.png",
                 "sizes": "192x192",
                 "type": "image/png",
                 "purpose": "any maskable"
             },
             {
-                "src": f"{base_url}/static/icons/icon-384x384.png",
+                "src": f"{baseurl}/static/icons/icon-384x384.png",
                 "sizes": "384x384",
                 "type": "image/png",
                 "purpose": "any"
             },
             {
-                "src": f"{base_url}/static/icons/icon-512x512.png",
+                "src": f"{baseurl}/static/icons/icon-512x512.png",
                 "sizes": "512x512",
                 "type": "image/png",
                 "purpose": "any maskable"
@@ -744,11 +755,10 @@ async def manifest(request: Request):
         ],
         "categories": ["productivity", "utilities"],
         "screenshots": [],
-        # ============================================================
+        
         # SHARE TARGET API - CRITICAL FOR ANDROID SHARING
-        # ============================================================
         "share_target": {
-            "action": "/share",
+            "action": "share",
             "method": "POST",
             "enctype": "multipart/form-data",
             "params": {
@@ -771,6 +781,7 @@ async def manifest(request: Request):
             }
         }
     }
+
 
 
 @app.post("/api/room/change")
