@@ -130,6 +130,7 @@ body {
     min-width: 0;
     height: 100vh;
     height: 100dvh;
+    height: 100svh;  /* Small viewport height for better mobile support */
 }
 
 .chat-header {
@@ -991,6 +992,7 @@ body {
 
     .messages-container {
         padding: 0.75rem;
+        overscroll-behavior: contain;
     }
 
     .message {
@@ -1056,3 +1058,125 @@ body {
 .user-list::-webkit-scrollbar-thumb:hover {
     background: var(--text-muted);
 }
+
+
+/* Room Change Modal */
+.room-change-modal {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.5);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 2000;
+}
+
+.room-change-modal.show {
+    display: flex;
+}
+
+.room-change-content {
+    background: var(--bg-main);
+    border-radius: 12px;
+    padding: 1.5rem;
+    min-width: 300px;
+    box-shadow: 0 8px 32px var(--shadow);
+    border: 1px solid var(--border-color);
+}
+
+.room-change-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 1rem;
+}
+
+.room-change-header h5 {
+    margin: 0;
+}
+
+.room-change-body label {
+    display: block;
+    margin-bottom: 0.5rem;
+    font-size: 0.9rem;
+    color: var(--text-secondary);
+}
+
+.room-change-body input {
+    width: 100%;
+    padding: 0.75rem;
+    background: var(--bg-message);
+    border: 1px solid var(--border-color);
+    color: var(--text-primary);
+    border-radius: 6px;
+    font-size: 1rem;
+    font-weight: 600;
+    text-transform: uppercase;
+}
+
+.room-change-body input:focus {
+    outline: none;
+    border-color: var(--primary);
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+}
+
+.btn-room-change {
+    background: var(--primary);
+    color: white;
+    border: none;
+    border-radius: 8px;
+    width: 40px;
+    height: 40px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    font-size: 1.2rem;
+    flex-shrink: 0;
+    transition: background 0.2s;
+}
+
+.btn-room-change:hover {
+    background: var(--primary-hover);
+}
+
+/* Mobile: Sticky Input Fix */
+@media (max-width: 768px) {
+    .input-group {
+        position: sticky;
+        bottom: 0;
+        z-index: 50;
+    }
+}
+
+/* Small screens: Keep input visible */
+@media (max-height: 600px) {
+    .messages-container {
+        max-height: calc(100vh - 200px);
+    }
+}
+
+/* PWA button */
+.btn-install-pwa {
+    background: var(--primary);
+    color: white;
+    border: none;
+    border-radius: 8px;
+    width: 40px;
+    height: 40px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    font-size: 1.2rem;
+    flex-shrink: 0;
+    transition: background 0.2s;
+}
+
+.btn-install-pwa:hover {
+    background: var(--primary-hover);
+}
+

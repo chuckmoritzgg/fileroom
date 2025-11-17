@@ -679,7 +679,7 @@ async def favicon():
 
 @app.get("/manifest.json")
 async def manifest(request: Request):
-    """PWA Manifest"""
+    """PWA Manifest with Share Target API"""
     base_url = str(request.base_url).rstrip('/')
     
     return {
@@ -743,8 +743,75 @@ async def manifest(request: Request):
             }
         ],
         "categories": ["productivity", "utilities"],
-        "screenshots": []
+        "screenshots": [],
+        # ============================================================
+        # SHARE TARGET API - CRITICAL FOR ANDROID SHARING
+        # ============================================================
+        "share_target": {
+            "action": "/share",
+            "method": "POST",
+            "enctype": "multipart/form-data",
+            "params": {
+                "title": "title",
+                "text": "text",
+                "url": "url",
+                "files": [
+                    {
+                        "name": "file",
+                        "accept": [
+                            "image/*",
+                            "video/*",
+                            "audio/*",
+                            "application/pdf",
+                            "application/zip",
+                            "application/*"
+                        ]
+                    }
+                ]
+            }
+        }
     }
+
+
+@app.post("/api/room/change")
+async def change_room(current_room: str, new_room: str, user_id: str = Query(...)):
+    """Change user to a different room"""
+    try:
+        current_room = current_room.upper()
+        new_room = new_room.upper()
+        
+        if new_room not in rooms_db:
+            rooms_db[new_room] = {
+                'code': new_room,
+                'created': datetime.now(),
+                'messages': []
+            }
+            room_users[new_room] = set()
+        
+        # Remove from old room
+        if current_room in room_users and user_id in room_users[current_room]:
+            room_users[current_room].discard(user_id)
+        
+        # Add to new room
+        if user_id in users_db:
+            users_db[user_id]['room'] = new_room
+            room_users[new_room].add(user_id)
+            
+            await broadcast_to_room(new_room, {
+                'type': 'user_joined',
+                'user_id': user_id,
+                'user_name': users_db[user_id]['name']
+            })
+        
+        return {
+            "success": True,
+            "new_room": new_room,
+            "redirect_url": f"/room/{new_room}"
+        }
+    
+    except Exception as e:
+        logger.error(f"Room change error: {e}")
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
 
 @app.delete("/api/room/{room_code}/all")
 async def delete_all_room_data(room_code: str):

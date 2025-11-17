@@ -41,37 +41,48 @@ if ('serviceWorker' in navigator) {
     });
 }
 
-// Handle PWA install prompt
+/* ============================================================
+   PWA INSTALLATION - IMPROVED
+   ============================================================ */
+
 window.addEventListener('beforeinstallprompt', (e) => {
     console.log('Install prompt available');
     e.preventDefault();
     deferredPrompt = e;
-    
-    // Show custom install button in sidebar
     showInstallButton();
 });
 
-// Handle successful installation
 window.addEventListener('appinstalled', () => {
     console.log('PWA installed successfully');
     deferredPrompt = null;
     hideInstallButton();
-    showToast('App installed! 🎉', 'success');
+    showToast('App installed!', 'success');
 });
 
 function showInstallButton() {
-    // Create install button if it doesn't exist
+    if (!deferredPrompt) return;
+    
     if (!installButton) {
-        const sidebarFooter = document.querySelector('.sidebar-footer');
-        if (sidebarFooter) {
+        const chatHeader = document.querySelector('.chat-header');
+        if (chatHeader) {
             installButton = document.createElement('button');
-            installButton.className = 'btn btn-primary w-100 mb-2';
-            installButton.innerHTML = '<i class="bi bi-download me-2"></i>Install App';
-            installButton.onclick = installPWA;
-            sidebarFooter.insertBefore(installButton, sidebarFooter.firstChild);
+            installButton.className = 'btn-install-pwa';
+            installButton.innerHTML = '<i class="bi bi-download"></i>';
+            installButton.title = 'Install as App';
+            installButton.onclick = (e) => {
+                e.stopPropagation();
+                installPWA();
+            };
+            
+            const qrBtn = chatHeader.querySelector('.btn-qr');
+            if (qrBtn) {
+                chatHeader.insertBefore(installButton, qrBtn);
+            } else {
+                chatHeader.appendChild(installButton);
+            }
         }
     } else {
-        installButton.style.display = 'block';
+        installButton.style.display = 'flex';
     }
 }
 
@@ -86,18 +97,31 @@ async function installPWA() {
         showToast('Installation not available', 'warning');
         return;
     }
+    
+    try {
+        deferredPrompt.prompt();
+        const { outcome } = await deferredPrompt.userChoice;
+        console.log(`User response to install prompt: ${outcome}`);
+        deferredPrompt = null;
+        hideInstallButton();
+    } catch (error) {
+        console.error('Installation error:', error);
+        showToast('Installation failed', 'danger');
+    }
+}
 
-    // Show the install prompt
-    deferredPrompt.prompt();
+function isStandalone() {
+    return (
+        window.matchMedia('(display-mode: standalone)').matches ||
+        window.navigator.standalone === true
+    );
+}
 
-    // Wait for the user's response
-    const { outcome } = await deferredPrompt.userChoice;
-    console.log(`User response to install prompt: ${outcome}`);
-
-    // Clear the deferredPrompt
-    deferredPrompt = null;
+if (isStandalone()) {
+    console.log('Running as installed PWA');
     hideInstallButton();
 }
+
 
 // Check if running as installed PWA
 function isStandalone() {
@@ -419,6 +443,19 @@ function setupUI() {
             attachMenu.classList.remove('show');
         }
     });
+    
+    // Focus management for mobile keyboards
+    const messageInput = document.getElementById('messageInput');
+    if (messageInput) {
+        messageInput.addEventListener('focus', () => {
+            setTimeout(() => {
+                messageInput.scrollIntoView({
+                    behavior: 'smooth',
+                    block: 'nearest'
+                });
+            }, 100);
+        });
+    }
 }
 
 // Send text message
@@ -1285,3 +1322,70 @@ function showToast(message, type) {
 
     setTimeout(() => toast.remove(), 5000);
 }
+
+// Room Change Functions
+function openRoomChangeModal() {
+    const modal = document.getElementById('roomChangeModal');
+    if (modal) {
+        modal.classList.add('show');
+        document.getElementById('newRoomInput').focus();
+    }
+}
+
+function closeRoomChangeModal() {
+    const modal = document.getElementById('roomChangeModal');
+    if (modal) {
+        modal.classList.remove('show');
+        document.getElementById('newRoomInput').value = '';
+    }
+}
+
+async function switchRoom() {
+    const newRoom = document.getElementById('newRoomInput').value.toUpperCase();
+    
+    if (!newRoom || newRoom.length !== 6) {
+        showToast('Invalid room code (must be 6 characters)', 'warning');
+        return;
+    }
+    
+    if (!currentUser) {
+        showToast('User not initialized', 'warning');
+        return;
+    }
+    
+    try {
+        const response = await fetch(
+            `/api/room/change?current_room=${encodeURIComponent(roomCode)}&new_room=${encodeURIComponent(newRoom)}&user_id=${encodeURIComponent(currentUser.id)}`,
+            { method: 'POST' }
+        );
+        
+        if (!response.ok) {
+            throw new Error('Failed to change room');
+        }
+        
+        const data = await response.json();
+        if (data.success) {
+            window.location.href = data.redirect_url;
+        } else {
+            showToast('Failed to change room', 'danger');
+        }
+    } catch (error) {
+        console.error('Room change error:', error);
+        showToast('Error changing room', 'danger');
+    }
+}
+
+// Allow Enter to switch room
+document.addEventListener('keydown', function(e) {
+    const modal = document.getElementById('roomChangeModal');
+    if (modal && modal.classList.contains('show') && e.key === 'Enter') {
+        switchRoom();
+    }
+});
+
+// Close modal when clicking outside
+document.getElementById('roomChangeModal')?.addEventListener('click', function(e) {
+    if (e.target === this) {
+        closeRoomChangeModal();
+    }
+});

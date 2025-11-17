@@ -91,6 +91,27 @@
         </div>
     </div>
 
+    <div class="room-change-modal" id="roomChangeModal">
+        <div class="room-change-content">
+            <div class="room-change-header">
+                <h5><i class="bi bi-door-open me-2"></i>Change Room</h5>
+                <button class="btn-close-modal" onclick="closeRoomChangeModal()">
+                    <i class="bi bi-x-lg"></i>
+                </button>
+            </div>
+            <div class="room-change-body">
+                <label>New Room Code:</label>
+                <input type="text" id="newRoomInput" placeholder="e.g., ABC123" maxlength="6"
+                    onkeyup="this.value = this.value.toUpperCase()">
+                <button class="btn btn-primary" onclick="switchRoom()" style="width: 100%; margin-top: 1rem;">
+                    <i class="bi bi-arrow-right me-2"></i>Switch Room
+                </button>
+            </div>
+        </div>
+    </div>
+
+
+
     <div class="chat-container">
         <!-- Sidebar -->
         <div class="sidebar" id="sidebar">
@@ -142,6 +163,9 @@
 
                 <button class="btn-qr" onclick="openQR()">
                     <i class="bi bi-qr-code"></i>
+                </button>
+                <button class="btn-room-change" onclick="openRoomChangeModal()" title="Change Room">
+                    <i class="bi bi-door-open"></i>
                 </button>
             </div>
 
