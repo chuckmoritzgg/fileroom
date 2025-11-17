@@ -678,14 +678,72 @@ async def favicon():
     return Response(status_code=204)
 
 @app.get("/manifest.json")
-async def manifest():
+async def manifest(request: Request):
+    """PWA Manifest"""
+    base_url = str(request.base_url).rstrip('/')
+    
     return {
-        "name": "FileRoom",
+        "name": "FileRoom - Ephemeral File Sharing",
         "short_name": "FileRoom",
+        "description": "Share files, messages, and locations in temporary rooms",
         "start_url": "/",
         "display": "standalone",
-        "background_color": "#ffffff",
-        "theme_color": "#2563eb"
+        "background_color": "#0f172a",
+        "theme_color": "#2563eb",
+        "orientation": "portrait-primary",
+        "scope": "/",
+        "icons": [
+            {
+                "src": f"{base_url}/static/icons/icon-72x72.png",
+                "sizes": "72x72",
+                "type": "image/png",
+                "purpose": "any"
+            },
+            {
+                "src": f"{base_url}/static/icons/icon-96x96.png",
+                "sizes": "96x96",
+                "type": "image/png",
+                "purpose": "any"
+            },
+            {
+                "src": f"{base_url}/static/icons/icon-128x128.png",
+                "sizes": "128x128",
+                "type": "image/png",
+                "purpose": "any"
+            },
+            {
+                "src": f"{base_url}/static/icons/icon-144x144.png",
+                "sizes": "144x144",
+                "type": "image/png",
+                "purpose": "any"
+            },
+            {
+                "src": f"{base_url}/static/icons/icon-152x152.png",
+                "sizes": "152x152",
+                "type": "image/png",
+                "purpose": "any"
+            },
+            {
+                "src": f"{base_url}/static/icons/icon-192x192.png",
+                "sizes": "192x192",
+                "type": "image/png",
+                "purpose": "any maskable"
+            },
+            {
+                "src": f"{base_url}/static/icons/icon-384x384.png",
+                "sizes": "384x384",
+                "type": "image/png",
+                "purpose": "any"
+            },
+            {
+                "src": f"{base_url}/static/icons/icon-512x512.png",
+                "sizes": "512x512",
+                "type": "image/png",
+                "purpose": "any maskable"
+            }
+        ],
+        "categories": ["productivity", "utilities"],
+        "screenshots": []
     }
 
 @app.delete("/api/room/{room_code}/all")

@@ -1,6 +1,120 @@
 /**
- * FileRoom Perfect - Enhanced with image modals, voice controls, link detection, circular timers
+ * FileRoom Perfect - Enhanced with link previews and perfect UX
  */
+
+// ============================================================================
+// SERVICE WORKER REGISTRATION (PWA)
+// ============================================================================
+
+let deferredPrompt = null;
+let installButton = null;
+
+// Register Service Worker
+if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+        navigator.serviceWorker.register('/static/sw.js')
+            .then(registration => {
+                console.log('Service Worker registered:', registration.scope);
+                
+                // Check for updates
+                registration.addEventListener('updatefound', () => {
+                    const newWorker = registration.installing;
+                    newWorker.addEventListener('statechange', () => {
+                        if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
+                            // New service worker available
+                            if (confirm('New version available! Reload to update?')) {
+                                newWorker.postMessage({ type: 'SKIP_WAITING' });
+                                window.location.reload();
+                            }
+                        }
+                    });
+                });
+            })
+            .catch(err => {
+                console.error('Service Worker registration failed:', err);
+            });
+    });
+
+    // Listen for controller change (new SW activated)
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+        window.location.reload();
+    });
+}
+
+// Handle PWA install prompt
+window.addEventListener('beforeinstallprompt', (e) => {
+    console.log('Install prompt available');
+    e.preventDefault();
+    deferredPrompt = e;
+    
+    // Show custom install button in sidebar
+    showInstallButton();
+});
+
+// Handle successful installation
+window.addEventListener('appinstalled', () => {
+    console.log('PWA installed successfully');
+    deferredPrompt = null;
+    hideInstallButton();
+    showToast('App installed! 🎉', 'success');
+});
+
+function showInstallButton() {
+    // Create install button if it doesn't exist
+    if (!installButton) {
+        const sidebarFooter = document.querySelector('.sidebar-footer');
+        if (sidebarFooter) {
+            installButton = document.createElement('button');
+            installButton.className = 'btn btn-primary w-100 mb-2';
+            installButton.innerHTML = '<i class="bi bi-download me-2"></i>Install App';
+            installButton.onclick = installPWA;
+            sidebarFooter.insertBefore(installButton, sidebarFooter.firstChild);
+        }
+    } else {
+        installButton.style.display = 'block';
+    }
+}
+
+function hideInstallButton() {
+    if (installButton) {
+        installButton.style.display = 'none';
+    }
+}
+
+async function installPWA() {
+    if (!deferredPrompt) {
+        showToast('Installation not available', 'warning');
+        return;
+    }
+
+    // Show the install prompt
+    deferredPrompt.prompt();
+
+    // Wait for the user's response
+    const { outcome } = await deferredPrompt.userChoice;
+    console.log(`User response to install prompt: ${outcome}`);
+
+    // Clear the deferredPrompt
+    deferredPrompt = null;
+    hideInstallButton();
+}
+
+// Check if running as installed PWA
+function isStandalone() {
+    return (
+        window.matchMedia('(display-mode: standalone)').matches ||
+        window.navigator.standalone === true
+    );
+}
+
+if (isStandalone()) {
+    console.log('Running as installed PWA');
+}
+
+// ============================================================================
+// REST OF THE EXISTING APP.JS CODE CONTINUES HERE...
+// ============================================================================
+
 
 'use strict';
 

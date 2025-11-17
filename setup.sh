@@ -3,6 +3,19 @@ echo "🚀 FileRoom Perfect - The Ultimate Chat Experience"
 echo "=================================================="
 echo ""
 
+# Check if icons exist
+if [ ! -d "static/icons" ] || [ -z "$(ls -A static/icons 2>/dev/null)" ]; then
+    echo "⚠️  PWA icons not found!"
+    echo "📦 Generating default icons..."
+    
+    if command -v python3 &> /dev/null; then
+        python3 generate_icons.py 2>/dev/null || echo "   Manual icon generation needed - see PWA-Complete-Files.md"
+    else
+        echo "   Please generate icons manually - see PWA-Complete-Files.md"
+    fi
+    echo ""
+fi
+
 if ! command -v docker &> /dev/null; then
     echo "❌ Docker not installed"
     exit 1

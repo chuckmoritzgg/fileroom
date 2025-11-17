@@ -3,6 +3,7 @@
 ![Version](https://img.shields.io/badge/Version-1.0.0-blue.svg)
 ![Docker](https://img.shields.io/badge/Dockerized-yes-green.svg)
 ![License](https://img.shields.io/badge/License-MIT-green.svg)
+![Lightweight](https://img.shields.io/badge/RAM_requirements-100_MB_+_in_RAM_storage-green.svg)
 
 **A modern, ephemeral chat application for temporary file and message sharing**
 
@@ -30,6 +31,12 @@ Share files, images, voice messages, and locations instantly in temporary rooms 
 - **No Registration** - No accounts, emails, or personal data required
 - **Temporary Storage** - Files stored in tmpfs (RAM-only)
 - **Auto-cleanup** - Inactive users automatically removed after 60 seconds
+
+### Progressive Web App
+- **Installable** - Add to home screen on mobile and desktop
+- **Offline Ready** - Service worker caches static assets
+- **App-like Experience** - Runs in standalone mode without browser UI
+- **Fast Loading** - Cached resources load instantly
 
 ## Screenshots
 
@@ -113,7 +120,6 @@ Potential features being considered for future releases:
 - **Typing indicators** for real-time presence
 - **Message reactions** with emoji support
 - **Desktop notifications** for new messages
-- **PWA support** for offline functionality
 
 ## Important Notice
 
