@@ -168,7 +168,9 @@ document.addEventListener('DOMContentLoaded', function() {
     scrollToBottom();
     initializeMaps();
     setupDragAndDrop();
-
+    
+    // Handle shared content from PWA Share Target
+    await handleSharedContent();
 
     // Heartbeat
     setInterval(() => {
@@ -236,6 +238,75 @@ async function initUser() {
         };
     }
 }
+
+
+// Handle shared content from PWA Share Target
+async function handleSharedContent() {
+    const urlParams = new URLSearchParams(window.location.search);
+    const shareSessionId = urlParams.get('share');
+    
+    if (!shareSessionId) {
+        return; // No shared content
+    }
+    
+    console.log('Processing shared content, session:', shareSessionId);
+    
+    try {
+        // Get share session data
+        const response = await fetch(`/api/share/${shareSessionId}`);
+        
+        if (!response.ok) {
+            console.error('Share session not found or expired');
+            showToast('Shared content expired', 'error');
+            // Clean URL
+            window.history.replaceState({}, document.title, window.location.pathname);
+            return;
+        }
+        
+        const shareData = await response.json();
+        console.log('Share data:', shareData);
+        
+        // Show notification to user
+        let shareMessage = 'Processing shared content...';
+        if (shareData.files && shareData.files.length > 0) {
+            shareMessage = `Uploading ${shareData.files.length} shared file(s)...`;
+        } else if (shareData.text || shareData.url) {
+            shareMessage = 'Adding shared content...';
+        }
+        
+        showToast(shareMessage, 'info');
+        
+        // Upload to current room
+        if (currentUser && roomCode) {
+            const uploadResponse = await fetch(
+                `/api/share/${shareSessionId}/upload/${roomCode}?user_id=${currentUser.id}`,
+                { method: 'POST' }
+            );
+            
+            if (uploadResponse.ok) {
+                const result = await uploadResponse.json();
+                showToast(`✓ Shared ${result.uploaded.length} item(s)`, 'success');
+                
+                // Refresh to show new messages
+                await refreshData();
+            } else {
+                showToast('Failed to upload shared content', 'error');
+            }
+        }
+        
+        // Clean URL
+        window.history.replaceState({}, document.title, window.location.pathname);
+        
+    } catch (error) {
+        console.error('Error handling shared content:', error);
+        showToast('Error processing shared content', 'error');
+        
+        // Clean URL
+        window.history.replaceState({}, document.title, window.location.pathname);
+    }
+}
+
+
 
 function connectWebSocket() {
     if (!currentUser || websocket) return;

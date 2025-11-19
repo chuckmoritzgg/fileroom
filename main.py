@@ -13,17 +13,19 @@ from typing import List, Optional, Dict, Set
 from pathlib import Path
 from io import BytesIO
 import json
-from urllib.parse import urlparse
+from urllib.parse import urlparse, quote_plus
 
 import aiofiles
 import qrcode
 
-from fastapi import FastAPI, File, UploadFile, Request, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, Form, UploadFile, Request, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
+from starlette.responses import RedirectResponse
+import uuid
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -57,6 +59,8 @@ users_db = {}
 room_users = {}
 websockets: Dict[str, WebSocket] = {}
 link_previews = {}  # Cache for link previews
+# Share target session storage (in-memory, ephemeral like everything else)
+share_sessions = {}  # {session_id: {'files': [...], 'text': ..., 'url': ..., 'created': datetime}}
 
 # Name generator
 ADJECTIVES = ['Happy', 'Sunny', 'Bright', 'Swift', 'Cool', 'Smart', 'Lucky', 'Bold', 'Calm', 'Free']
@@ -174,10 +178,37 @@ async def cleanup_expired():
         except Exception as e:
             logger.error(f"Cleanup loop error: {e}")
 
+async def cleanup_share_sessions():
+    """Cleanup old share sessions (expire after 5 minutes)"""
+    while True:
+        try:
+            await asyncio.sleep(60)
+            current = datetime.now()
+            
+            expired = [
+                sid for sid, session in share_sessions.items() 
+                if current >= session['created'] + timedelta(minutes=5)
+            ]
+            
+            for sid in expired:
+                # Clean up any temporary files
+                if 'files' in share_sessions[sid]:
+                    for file_info in share_sessions[sid]['files']:
+                        file_path = UPLOAD_DIR / file_info['temp_name']
+                        if file_path.exists():
+                            file_path.unlink()
+                
+                del share_sessions[sid]
+                logger.info(f"Cleaned up expired share session: {sid}")
+                
+        except Exception as e:
+            logger.error(f"Share session cleanup error: {e}")
+
 @app.on_event("startup")
 async def startup():
     asyncio.create_task(cleanup_expired())
     asyncio.create_task(check_user_activity())
+    asyncio.create_task(cleanup_share_sessions())
     logger.info("FileRoom Perfect started")
 
 # Routes
@@ -782,6 +813,275 @@ async def manifest(request: Request):
         }
     }
 
+@app.post("/share")
+async def handle_share_target(
+    request: Request,
+    title: Optional[str] = Form(None),
+    text: Optional[str] = Form(None),
+    url: Optional[str] = Form(None),
+    file: Optional[List[UploadFile]] = File(None)
+):
+    """
+    PWA Share Target API Handler
+    Receives shared content from Android/iOS and routes to room with context preservation
+    
+    Flow:
+    1. Accept shared files/text/URLs from OS share menu
+    2. Store temporarily in session
+    3. Redirect to room selection/creation page with session ID
+    4. JavaScript picks up session and uploads to room
+    """
+    try:
+        logger.info(f"Share received - title: {title}, text: {text}, url: {url}, files: {len(file) if file else 0}")
+        
+        # Create share session
+        session_id = secrets.token_urlsafe(16)
+        share_data = {
+            'created': datetime.now(),
+            'title': title,
+            'text': text,
+            'url': url,
+            'files': []
+        }
+        
+        # Handle shared files
+        if file and len(file) > 0:
+            for f in file:
+                if f.filename and f.size > 0:
+                    try:
+                        # Save to temporary location
+                        temp_name = f"share_{session_id}_{secrets.token_urlsafe(8)}_{f.filename}"
+                        file_path = UPLOAD_DIR / temp_name
+                        
+                        content = await f.read()
+                        
+                        # Skip if too large
+                        if len(content) > MAX_FILE_SIZE:
+                            logger.warning(f"Skipped large file: {f.filename} ({len(content)} bytes)")
+                            continue
+                        
+                        async with aiofiles.open(file_path, 'wb') as out_file:
+                            await out_file.write(content)
+                        
+                        # Determine file type
+                        file_type = 'file'
+                        if f.content_type:
+                            if f.content_type.startswith('image/'):
+                                file_type = 'image'
+                            elif f.content_type.startswith('audio/'):
+                                file_type = 'voice'
+                        
+                        share_data['files'].append({
+                            'temp_name': temp_name,
+                            'original_name': f.filename,
+                            'size': len(content),
+                            'type': file_type,
+                            'content_type': f.content_type
+                        })
+                        
+                        logger.info(f"Saved shared file: {f.filename} ({len(content)} bytes) as {temp_name}")
+                        
+                    except Exception as e:
+                        logger.error(f"Error saving shared file {f.filename}: {e}")
+                        continue
+        
+        # Store session
+        share_sessions[session_id] = share_data
+        
+        # Build redirect URL with session parameter
+        redirect_url = f"/?share={session_id}"
+        
+        # Add text/URL as query params for immediate display if no files
+        if text and not file:
+            redirect_url += f"&shareText={quote_plus(text[:200])}"
+        if url and not file:
+            redirect_url += f"&shareUrl={quote_plus(url)}"
+        
+        logger.info(f"Redirecting to: {redirect_url}")
+        
+        # 303 See Other - tells browser to GET the redirect URL
+        return RedirectResponse(url=redirect_url, status_code=303)
+        
+    except Exception as e:
+        logger.error(f"Share target error: {e}", exc_info=True)
+        # On error, redirect to home
+        return RedirectResponse(url="/?shareError=1", status_code=303)
+
+
+@app.get("/api/share/{session_id}")
+async def get_share_session(session_id: str):
+    """
+    Retrieve share session data
+    Called by JavaScript after redirect to process shared content
+    """
+    try:
+        if session_id not in share_sessions:
+            raise HTTPException(status_code=404, detail="Share session not found or expired")
+        
+        session = share_sessions[session_id]
+        
+        # Return session data (but not file paths for security)
+        return {
+            "success": True,
+            "title": session.get('title'),
+            "text": session.get('text'),
+            "url": session.get('url'),
+            "files": [
+                {
+                    'name': f['original_name'],
+                    'size': f['size'],
+                    'type': f['type']
+                }
+                for f in session.get('files', [])
+            ]
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Get share session error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/share/{session_id}/upload/{room_code}")
+async def upload_shared_files(
+    session_id: str,
+    room_code: str,
+    user_id: str = Query(...)
+):
+    """
+    Upload shared files from session to room
+    Called by JavaScript after user selects/creates room
+    """
+    try:
+        if session_id not in share_sessions:
+            raise HTTPException(status_code=404, detail="Share session not found or expired")
+        
+        room_code = room_code.upper()
+        
+        if room_code not in rooms_db:
+            raise HTTPException(status_code=404, detail="Room not found")
+        
+        session = share_sessions[session_id]
+        
+        username = "Anonymous"
+        if user_id and user_id in users_db:
+            username = users_db[user_id]['name']
+            users_db[user_id]['last_seen'] = datetime.now()
+        
+        uploaded = []
+        now = datetime.now()
+        expiry = now + timedelta(hours=MESSAGE_EXPIRY_HOURS)
+        
+        # Upload shared text/URL as message
+        if session.get('text') or session.get('url'):
+            msg_text = []
+            if session.get('title'):
+                msg_text.append(f"📤 Shared: {session['title']}")
+            if session.get('text'):
+                msg_text.append(session['text'])
+            if session.get('url'):
+                msg_text.append(session['url'])
+            
+            combined_text = '\n'.join(msg_text)
+            
+            msg_id = generate_id()
+            messages_db[msg_id] = {
+                'id': msg_id,
+                'type': 'text',
+                'text': combined_text,
+                'username': username,
+                'user_id': user_id,
+                'room': room_code,
+                'timestamp': now,
+                'expiry': expiry
+            }
+            
+            rooms_db[room_code]['messages'].append(msg_id)
+            
+            await broadcast_to_room(room_code, {
+                'type': 'new_message',
+                'message': {
+                    'id': msg_id,
+                    'type': 'text',
+                    'text': combined_text,
+                    'links': extract_links(combined_text),
+                    'username': username,
+                    'time': now.strftime("%H:%M"),
+                    'time_remaining': int((expiry - now).total_seconds())
+                }
+            })
+            
+            uploaded.append({'id': msg_id, 'type': 'text'})
+        
+        # Upload shared files
+        for file_info in session.get('files', []):
+            try:
+                temp_path = UPLOAD_DIR / file_info['temp_name']
+                
+                if not temp_path.exists():
+                    logger.warning(f"Temp file not found: {temp_path}")
+                    continue
+                
+                msg_id = generate_id()
+                final_name = f"{msg_id}_{file_info['original_name']}"
+                final_path = UPLOAD_DIR / final_name
+                
+                # Move from temp to final location
+                temp_path.rename(final_path)
+                
+                messages_db[msg_id] = {
+                    'id': msg_id,
+                    'type': file_info['type'],
+                    'original_name': file_info['original_name'],
+                    'filename': final_name,
+                    'size': file_info['size'],
+                    'username': username,
+                    'user_id': user_id,
+                    'room': room_code,
+                    'timestamp': now,
+                    'expiry': expiry
+                }
+                
+                rooms_db[room_code]['messages'].append(msg_id)
+                
+                await broadcast_to_room(room_code, {
+                    'type': 'new_message',
+                    'message': {
+                        'id': msg_id,
+                        'type': file_info['type'],
+                        'filename': file_info['original_name'],
+                        'size_mb': round(file_info['size'] / (1024*1024), 2),
+                        'username': username,
+                        'time': now.strftime("%H:%M"),
+                        'time_remaining': int((expiry - now).total_seconds())
+                    }
+                })
+                
+                uploaded.append({
+                    'id': msg_id,
+                    'type': file_info['type'],
+                    'name': file_info['original_name']
+                })
+                
+            except Exception as e:
+                logger.error(f"Error uploading shared file {file_info['original_name']}: {e}")
+                continue
+        
+        # Clean up session
+        del share_sessions[session_id]
+        
+        return {
+            "success": True,
+            "message": f"Uploaded {len(uploaded)} items",
+            "uploaded": uploaded
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Upload shared files error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/room/change")

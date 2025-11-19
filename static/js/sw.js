@@ -7,7 +7,7 @@
  * const CACHE_NAME = 'fileroom-v2';  // Change v1 → v2 ...
  */
 
-const CACHE_NAME = 'fileroom-v1';
+const CACHE_NAME = 'fileroom-v3';
 const RUNTIME_CACHE = 'fileroom-runtime-v1';
 
 // Files to cache on install
