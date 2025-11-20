@@ -25,7 +25,12 @@ from fastapi.templating import Jinja2Templates
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 from starlette.responses import RedirectResponse
+from starlette.requests import Request as StarletteRequest
 import uuid
+
+from email import message_from_bytes
+from email.policy import default
+
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -179,27 +184,34 @@ async def cleanup_expired():
             logger.error(f"Cleanup loop error: {e}")
 
 async def cleanup_share_sessions():
-    """Cleanup old share sessions (expire after 5 minutes)"""
+    """Cleanup old share sessions (expire after 15 minutes)"""
     while True:
         try:
-            await asyncio.sleep(60)
+            await asyncio.sleep(60)  # Check every minute
             current = datetime.now()
             
             expired = [
                 sid for sid, session in share_sessions.items() 
-                if current >= session['created'] + timedelta(minutes=5)
+                if current >= session['created'] + timedelta(minutes=15)  # Changed from 10 to 15
             ]
             
             for sid in expired:
+                session = share_sessions[sid]
+                files_cleaned = 0
+                
                 # Clean up any temporary files
-                if 'files' in share_sessions[sid]:
-                    for file_info in share_sessions[sid]['files']:
+                if 'files' in session:
+                    for file_info in session['files']:
                         file_path = UPLOAD_DIR / file_info['temp_name']
                         if file_path.exists():
-                            file_path.unlink()
+                            try:
+                                file_path.unlink()
+                                files_cleaned += 1
+                            except Exception as e:
+                                logger.error(f"Failed to delete temp file {file_path}: {e}")
                 
                 del share_sessions[sid]
-                logger.info(f"Cleaned up expired share session: {sid}")
+                logger.info(f"Cleaned up expired share session {sid}: {files_cleaned} files deleted")
                 
         except Exception as e:
             logger.error(f"Share session cleanup error: {e}")
@@ -213,9 +225,29 @@ async def startup():
 
 # Routes
 @app.get("/", response_class=HTMLResponse)
-async def home():
+async def home(request: Request, share: Optional[str] = Query(None)):
+    """
+    Home route - handles both normal access and share target redirects
+    """
+    # If share session exists, show room selection page instead of auto-redirect
+    if share:
+        # Verify session exists before showing template
+        if share in share_sessions:
+            logger.info(f"Rendering room selection for share session: {share}")
+            return templates.TemplateResponse("share_room_select.html", {
+                "request": request,
+                "sharesessionid": share
+            })
+        else:
+            logger.warning(f"Share session not found: {share}")
+            # Session expired or invalid - redirect to home with error
+            return HTMLResponse('<meta http-equiv="refresh" content="0;url=/?shareError=expired">')
+    
+    # Normal behavior: redirect to new room
     room_code = generate_room_code()
     return HTMLResponse(f'<meta http-equiv="refresh" content="0;url=/room/{room_code}">')
+
+
 
 @app.get("/room/{room_code}", response_class=HTMLResponse)
 async def room_page(request: Request, room_code: str):
@@ -789,7 +821,7 @@ async def manifest(request: Request):
         
         # SHARE TARGET API - CRITICAL FOR ANDROID SHARING
         "share_target": {
-            "action": "share",
+            "action": "/share",
             "method": "POST",
             "enctype": "multipart/form-data",
             "params": {
@@ -798,134 +830,226 @@ async def manifest(request: Request):
                 "url": "url",
                 "files": [
                     {
-                        "name": "file",
-                        "accept": [
-                            "image/*",
-                            "video/*",
-                            "audio/*",
-                            "application/pdf",
-                            "application/zip",
-                            "application/*"
-                        ]
+                        "name": "files",
+                        "accept": ["*/*"]
                     }
                 ]
             }
         }
     }
 
+
+
+
 @app.post("/share")
-async def handle_share_target(
-    request: Request,
-    title: Optional[str] = Form(None),
-    text: Optional[str] = Form(None),
-    url: Optional[str] = Form(None),
-    file: Optional[List[UploadFile]] = File(None)
-):
+async def handle_share_target(request: Request):
     """
-    PWA Share Target API Handler
-    Receives shared content from Android/iOS and routes to room with context preservation
+    PWA Share Target Handler - FIXED FOR SAMSUNG BROWSER
     
-    Flow:
-    1. Accept shared files/text/URLs from OS share menu
-    2. Store temporarily in session
-    3. Redirect to room selection/creation page with session ID
-    4. JavaScript picks up session and uploads to room
+    Manually parses multipart/form-data because Samsung Browser sends
+    non-standard boundaries that break Starlette's form parser.
     """
+    request_id = secrets.token_urlsafe(8)
+    
     try:
-        logger.info(f"Share received - title: {title}, text: {text}, url: {url}, files: {len(file) if file else 0}")
+        logger.info(f"[{request_id}] Share request received")
+        
+        # Get raw body and content-type
+        raw_body = await request.body()
+        content_type = request.headers.get('content-type', '')
+        
+        logger.info(f"[{request_id}] Content-Type: {content_type}")
+        logger.info(f"[{request_id}] Body length: {len(raw_body)}")
+        
+        # Extract boundary from content-type
+        if 'boundary=' not in content_type:
+            logger.error(f"[{request_id}] No boundary in content-type")
+            return RedirectResponse(url="/?shareError=no-boundary", status_code=303)
+        
+        boundary = content_type.split('boundary=')[1].strip()
+
+        logger.info(f"[{request_id}] Boundary: {boundary[:50]}...")
+        
+        # Parse multipart data manually using email library
+        # Construct proper MIME message
+        mime_body = (
+            f"MIME-Version: 1.0\r\n"
+            f"Content-Type: {content_type}\r\n"
+            f"\r\n"
+        ).encode() + raw_body
+        
+        msg = message_from_bytes(mime_body, policy=default)
+        
+        # Extract fields and files
+        title = None
+        text = None
+        url = None
+        files_to_save = []
+        
+        for part in msg.iter_parts():
+            content_disposition = part.get('Content-Disposition', '')
+            
+            # Parse name from Content-Disposition
+            name = None
+            filename = None
+            
+            if 'name=' in content_disposition:
+                # Extract name
+                for param in content_disposition.split(';'):
+                    param = param.strip()
+                    if param.startswith('name='):
+                        name = param.split('=', 1)[1].strip('"')
+
+                    elif param.startswith('filename='):
+                        filename = param.split('=', 1)[1].strip('"')
+
+            
+            if not name:
+                continue
+            
+            # Get content
+            content = part.get_payload(decode=True)
+            
+            if filename:
+                # It's a file
+                logger.info(f"[{request_id}] Found file: {filename} ({len(content)} bytes)")
+                files_to_save.append({
+                    'filename': filename,
+                    'content': content,
+                    'content_type': part.get_content_type()
+                })
+            else:
+                # It's a text field
+                text_content = content.decode('utf-8', errors='ignore').strip()
+                if name == 'title':
+                    title = text_content
+                elif name == 'text':
+                    text = text_content
+                elif name == 'url':
+                    url = text_content
+        
+        logger.info(f"[{request_id}] Parsed: title={title}, text={text[:30] if text else None}, url={url}, files={len(files_to_save)}")
+        
+        # Validate we have something
+        if not title and not text and not url and len(files_to_save) == 0:
+            logger.warning(f"[{request_id}] Empty share request")
+            return RedirectResponse(url="/?shareError=empty", status_code=303)
         
         # Create share session
         session_id = secrets.token_urlsafe(16)
         share_data = {
             'created': datetime.now(),
+            'request_id': request_id,
             'title': title,
             'text': text,
             'url': url,
             'files': []
         }
         
-        # Handle shared files
-        if file and len(file) > 0:
-            for f in file:
-                if f.filename and f.size > 0:
-                    try:
-                        # Save to temporary location
-                        temp_name = f"share_{session_id}_{secrets.token_urlsafe(8)}_{f.filename}"
-                        file_path = UPLOAD_DIR / temp_name
-                        
-                        content = await f.read()
-                        
-                        # Skip if too large
-                        if len(content) > MAX_FILE_SIZE:
-                            logger.warning(f"Skipped large file: {f.filename} ({len(content)} bytes)")
-                            continue
-                        
-                        async with aiofiles.open(file_path, 'wb') as out_file:
-                            await out_file.write(content)
-                        
-                        # Determine file type
-                        file_type = 'file'
-                        if f.content_type:
-                            if f.content_type.startswith('image/'):
-                                file_type = 'image'
-                            elif f.content_type.startswith('audio/'):
-                                file_type = 'voice'
-                        
-                        share_data['files'].append({
-                            'temp_name': temp_name,
-                            'original_name': f.filename,
-                            'size': len(content),
-                            'type': file_type,
-                            'content_type': f.content_type
-                        })
-                        
-                        logger.info(f"Saved shared file: {f.filename} ({len(content)} bytes) as {temp_name}")
-                        
-                    except Exception as e:
-                        logger.error(f"Error saving shared file {f.filename}: {e}")
-                        continue
+        # Save files
+        files_saved = 0
+        files_skipped = 0
+        
+        for file_info in files_to_save:
+            filename = file_info['filename']
+            content = file_info['content']
+            content_type = file_info['content_type']
+            
+            if not filename or len(content) == 0:
+                logger.warning(f"[{request_id}] Skipping empty file")
+                files_skipped += 1
+                continue
+            
+            if len(content) > MAX_FILE_SIZE:
+                logger.warning(f"[{request_id}] File too large: {filename} ({len(content)} bytes)")
+                files_skipped += 1
+                continue
+            
+            try:
+                # Generate temp filename
+                temp_name = f"share_{session_id}_{secrets.token_urlsafe(8)}_{filename}"
+                file_path = UPLOAD_DIR / temp_name
+                
+                # Write to disk
+                async with aiofiles.open(file_path, 'wb') as f:
+                    await f.write(content)
+                
+                # Verify
+                if not file_path.exists():
+                    logger.error(f"[{request_id}] File not found after write")
+                    files_skipped += 1
+                    continue
+                
+                # Determine type
+                file_type = 'file'
+                if content_type:
+                    if content_type.startswith('image/'):
+                        file_type = 'image'
+                    elif content_type.startswith('audio/'):
+                        file_type = 'voice'
+                
+                share_data['files'].append({
+                    'temp_name': temp_name,
+                    'original_name': filename,
+                    'size': len(content),
+                    'type': file_type,
+                    'content_type': content_type
+                })
+                
+                files_saved += 1
+                logger.info(f"[{request_id}] Saved: {filename} as {temp_name}")
+                
+            except Exception as e:
+                logger.error(f"[{request_id}] Error saving {filename}: {e}")
+                files_skipped += 1
         
         # Store session
         share_sessions[session_id] = share_data
         
-        # Build redirect URL with session parameter
-        redirect_url = f"/?share={session_id}"
+        logger.info(f"[{request_id}] Session created: {session_id}")
+        logger.info(f"[{request_id}] Files: saved={files_saved}, skipped={files_skipped}")
         
-        # Add text/URL as query params for immediate display if no files
-        if text and not file:
-            redirect_url += f"&shareText={quote_plus(text[:200])}"
-        if url and not file:
-            redirect_url += f"&shareUrl={quote_plus(url)}"
-        
-        logger.info(f"Redirecting to: {redirect_url}")
-        
-        # 303 See Other - tells browser to GET the redirect URL
-        return RedirectResponse(url=redirect_url, status_code=303)
+        # Redirect to room selection
+        return RedirectResponse(url=f"/?share={session_id}", status_code=303)
         
     except Exception as e:
-        logger.error(f"Share target error: {e}", exc_info=True)
-        # On error, redirect to home
-        return RedirectResponse(url="/?shareError=1", status_code=303)
+        logger.error(f"[{request_id}] Exception: {e}", exc_info=True)
+        return RedirectResponse(url="/?shareError=exception", status_code=303)
+
 
 
 @app.get("/api/share/{session_id}")
 async def get_share_session(session_id: str):
     """
-    Retrieve share session data
-    Called by JavaScript after redirect to process shared content
+    Retrieve share session data - REFACTORED
     """
     try:
         if session_id not in share_sessions:
-            raise HTTPException(status_code=404, detail="Share session not found or expired")
+            logger.warning(f"Share session not found: {session_id}")
+            raise HTTPException(
+                status_code=404, 
+                detail="Share session not found or expired. Please try sharing again."
+            )
         
         session = share_sessions[session_id]
         
-        # Return session data (but not file paths for security)
+        # Check session age
+        age_seconds = (datetime.now() - session['created']).total_seconds()
+        if age_seconds > 900:  # 15 minutes
+            logger.warning(f"Share session expired: {session_id} (age: {age_seconds}s)")
+            # Don't delete yet - cleanup task will handle it
+            raise HTTPException(
+                status_code=410,
+                detail="Share session expired. Please try sharing again."
+            )
+        
+        # Return session data (exclude internal fields)
         return {
             "success": True,
             "title": session.get('title'),
             "text": session.get('text'),
             "url": session.get('url'),
+            "age_seconds": int(age_seconds),
             "files": [
                 {
                     'name': f['original_name'],
@@ -943,6 +1067,7 @@ async def get_share_session(session_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+
 @app.post("/api/share/{session_id}/upload/{room_code}")
 async def upload_shared_files(
     session_id: str,
@@ -950,20 +1075,44 @@ async def upload_shared_files(
     user_id: str = Query(...)
 ):
     """
-    Upload shared files from session to room
-    Called by JavaScript after user selects/creates room
+    Upload shared files from session to room - REFACTORED
     """
+    request_id = secrets.token_urlsafe(8)
+    
     try:
+        logger.info(f"[{request_id}] Upload request: session={session_id}, room={room_code}, user={user_id}")
+        
+        # Validate session exists
         if session_id not in share_sessions:
-            raise HTTPException(status_code=404, detail="Share session not found or expired")
+            logger.error(f"[{request_id}] Session not found")
+            raise HTTPException(
+                status_code=404, 
+                detail="Share session not found or expired"
+            )
         
         room_code = room_code.upper()
-        
-        if room_code not in rooms_db:
-            raise HTTPException(status_code=404, detail="Room not found")
-        
         session = share_sessions[session_id]
         
+        # Check session age
+        age_seconds = (datetime.now() - session['created']).total_seconds()
+        if age_seconds > 900:  # 15 minutes
+            logger.warning(f"[{request_id}] Session too old: {age_seconds}s")
+            raise HTTPException(
+                status_code=410,
+                detail="Share session expired"
+            )
+        
+        # Ensure room exists
+        if room_code not in rooms_db:
+            rooms_db[room_code] = {
+                "code": room_code,
+                "created": datetime.now(),
+                "messages": []
+            }
+            room_users[room_code] = set()
+            logger.info(f"[{request_id}] Created new room: {room_code}")
+        
+        # Get username
         username = "Anonymous"
         if user_id and user_id in users_db:
             username = users_db[user_id]['name']
@@ -973,7 +1122,7 @@ async def upload_shared_files(
         now = datetime.now()
         expiry = now + timedelta(hours=MESSAGE_EXPIRY_HOURS)
         
-        # Upload shared text/URL as message
+        # Upload text/URL as message first
         if session.get('text') or session.get('url'):
             msg_text = []
             if session.get('title'):
@@ -1013,23 +1162,60 @@ async def upload_shared_files(
             })
             
             uploaded.append({'id': msg_id, 'type': 'text'})
+            logger.info(f"[{request_id}] Text message created")
         
-        # Upload shared files
-        for file_info in session.get('files', []):
+        # Upload files with atomic operations
+        files_to_process = session.get("files", [])
+        logger.info(f"[{request_id}] Processing {len(files_to_process)} files")
+        
+        for idx, file_info in enumerate(files_to_process):
             try:
-                temp_path = UPLOAD_DIR / file_info['temp_name']
+                logger.info(f"[{request_id}] File {idx+1}/{len(files_to_process)}: {file_info['original_name']}")
                 
+                temp_path = UPLOAD_DIR / file_info["temp_name"]
+                
+                # Validate temp file exists
                 if not temp_path.exists():
-                    logger.warning(f"Temp file not found: {temp_path}")
+                    error_msg = f"Temp file not found: {temp_path}"
+                    logger.error(f"[{request_id}] {error_msg}")
                     continue
                 
+                # Verify it's actually a file
+                if not temp_path.is_file():
+                    logger.error(f"[{request_id}] Path exists but is not a file: {temp_path}")
+                    continue
+                
+                # Generate message ID and final filename
                 msg_id = generate_id()
-                final_name = f"{msg_id}_{file_info['original_name']}"
+                
+                # Sanitize original filename
+                safe_original_name = "".join(
+                    c for c in file_info['original_name'] 
+                    if c.isalnum() or c in (' ', '.', '_', '-')
+                ).strip()
+                
+                if not safe_original_name:
+                    safe_original_name = f"file_{msg_id}"
+                
+                final_name = f"{msg_id}_{safe_original_name}"
                 final_path = UPLOAD_DIR / final_name
                 
-                # Move from temp to final location
-                temp_path.rename(final_path)
+                # Atomic rename operation
+                try:
+                    temp_path.rename(final_path)
+                    logger.info(f"[{request_id}] Renamed: {file_info['temp_name']} → {final_name}")
+                except OSError as e:
+                    logger.error(f"[{request_id}] Rename failed: {e}")
+                    # Try copy as fallback
+                    try:
+                        import shutil
+                        shutil.move(str(temp_path), str(final_path))
+                        logger.info(f"[{request_id}] Used shutil.move fallback")
+                    except Exception as copy_error:
+                        logger.error(f"[{request_id}] Fallback also failed: {copy_error}")
+                        continue
                 
+                # Create message in database
                 messages_db[msg_id] = {
                     'id': msg_id,
                     'type': file_info['type'],
@@ -1045,6 +1231,7 @@ async def upload_shared_files(
                 
                 rooms_db[room_code]['messages'].append(msg_id)
                 
+                # Broadcast to room
                 await broadcast_to_room(room_code, {
                     'type': 'new_message',
                     'message': {
@@ -1064,24 +1251,45 @@ async def upload_shared_files(
                     'name': file_info['original_name']
                 })
                 
+                logger.info(f"[{request_id}] File uploaded successfully: {file_info['original_name']}")
+                
             except Exception as e:
-                logger.error(f"Error uploading shared file {file_info['original_name']}: {e}")
+                logger.error(f"[{request_id}] Error uploading file {file_info['original_name']}: {e}", exc_info=True)
                 continue
         
         # Clean up session
         del share_sessions[session_id]
+        logger.info(f"[{request_id}] Session deleted: {session_id}")
         
-        return {
-            "success": True,
-            "message": f"Uploaded {len(uploaded)} items",
-            "uploaded": uploaded
+        # Calculate success metrics
+        expected_count = len(files_to_process)
+        uploaded_count = len([u for u in uploaded if u.get("type") != "text"])
+        success = uploaded_count > 0 or session.get("text") or session.get("url")
+        
+        response = {
+            "success": success,
+            "message": f"Uploaded {len(uploaded)} item(s)",
+            "uploaded": uploaded,
+            "expected_files": expected_count,
+            "uploaded_files": uploaded_count
         }
+        
+        # Add warning if some files failed
+        if expected_count > uploaded_count:
+            failed_count = expected_count - uploaded_count
+            response["warning"] = f"{failed_count} file(s) could not be uploaded"
+            logger.warning(f"[{request_id}] {failed_count} files failed to upload")
+        
+        logger.info(f"[{request_id}] Upload complete: {uploaded_count}/{expected_count} files")
+        
+        return response
         
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Upload shared files error: {e}", exc_info=True)
+        logger.error(f"[{request_id}] Upload shared files error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
 
 
 @app.post("/api/room/change")

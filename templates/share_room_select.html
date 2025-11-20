@@ -1,0 +1,695 @@
+<!DOCTYPE html>
+<html lang="en" style="overflow-y: auto;">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Select Room - FileRoom</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.1/font/bootstrap-icons.css">
+    <link rel="stylesheet" href="/static/css/styles.css">
+    <style>
+        /* CRITICAL: Allow page scrolling */
+        html {
+            overflow-y: auto !important;
+            height: auto !important;
+        }
+        
+        body {
+            overflow-y: auto !important;
+            min-height: 100vh;
+            height: auto !important;
+            margin: 0;
+            padding: 1rem;
+            padding-bottom: 3rem;
+            background-color: var(--bg-main);
+            color: var(--text-primary);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        
+        .share-container {
+            max-width: 400px;
+            width: 100%;
+            background: var(--bg-card, #334155);
+            border-radius: 16px;
+            padding: 2rem;
+            box-shadow: 0 8px 32px var(--shadow);
+            border: 1px solid var(--border-color);
+            margin: 1rem 0;
+        }
+        
+        h4 {
+            margin-bottom: 1.5rem;
+            text-align: center;
+        }
+        
+        .share-info {
+            background: var(--bg-message);
+            border-radius: 8px;
+            padding: 1rem;
+            margin-bottom: 1.5rem;
+            font-size: 0.9rem;
+        }
+        
+        .share-info strong {
+            color: var(--primary);
+        }
+        
+        input.room-code-input {
+            width: 100%;
+            padding: 0.75rem 1rem;
+            font-size: 1.2rem;
+            font-weight: bold;
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.12em;
+            margin-bottom: 1rem;
+            background: var(--bg-message);
+            color: var(--text-primary);
+        }
+        
+        input.room-code-input:focus {
+            outline: none;
+            border-color: var(--primary);
+            box-shadow: 0 0 8px var(--primary);
+        }
+        
+        button.btn-action {
+            width: 100%;
+            padding: 0.75rem;
+            font-size: 1.1rem;
+            border-radius: 12px;
+            border: none;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+            margin-bottom: 0.5rem;
+        }
+        
+        button.btn-primary-action {
+            background-color: var(--primary);
+            color: white;
+        }
+        
+        button.btn-primary-action:hover:not(:disabled) {
+            background-color: #1d4ed8;
+            transform: translateY(-2px);
+        }
+        
+        button.btn-secondary-action {
+            background-color: var(--bg-message);
+            color: var(--text-primary);
+            border: 1px solid var(--border-color);
+        }
+        
+        button.btn-secondary-action:hover:not(:disabled) {
+            background-color: #475569;
+        }
+        
+        button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+        
+        .divider {
+            text-align: center;
+            margin: 1rem 0;
+            color: var(--text-muted);
+            font-size: 0.85rem;
+        }
+        
+        .recent-rooms {
+            margin-top: 1.5rem;
+        }
+        
+        .recent-rooms h6 {
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            margin-bottom: 0.75rem;
+        }
+        
+        .recent-room-item {
+            background: var(--bg-message);
+            padding: 0.75rem;
+            border-radius: 8px;
+            margin-bottom: 0.5rem;
+            cursor: pointer;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            transition: background 0.2s;
+        }
+        
+        .recent-room-item:hover {
+            background: #475569;
+        }
+        
+        #status {
+            margin-top: 1rem;
+            padding: 0.75rem;
+            border-radius: 8px;
+            text-align: center;
+            font-size: 0.9rem;
+        }
+        
+        .status-error {
+            background: rgba(239, 68, 68, 0.2);
+            color: #fca5a5;
+            border: 1px solid #f87171;
+        }
+        
+        .status-success {
+            background: rgba(16, 185, 129, 0.2);
+            color: #6ee7b7;
+            border: 1px solid #34d399;
+        }
+        
+        .spinner {
+            display: inline-block;
+            width: 1rem;
+            height: 1rem;
+            border: 2px solid rgba(255, 255, 255, 0.3);
+            border-top-color: white;
+            border-radius: 50%;
+            animation: spin 0.6s linear infinite;
+        }
+        
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        
+        /* Progress indicator */
+        .upload-progress {
+            margin-top: 1rem;
+            padding: 1rem;
+            background: var(--bg-message);
+            border-radius: 8px;
+            display: none;
+        }
+        
+        .upload-progress.show {
+            display: block;
+        }
+        
+        .progress-item {
+            padding: 0.5rem 0;
+            font-size: 0.85rem;
+        }
+        
+        .progress-item i {
+            margin-right: 0.5rem;
+        }
+        
+        .progress-item.success {
+            color: #6ee7b7;
+        }
+        
+        .progress-item.error {
+            color: #fca5a5;
+        }
+        
+        /* Debug panel */
+        .debug-panel {
+            max-width: 600px;
+            width: 100%;
+            margin: 2rem 0;
+            background: #1e293b;
+            border: 1px solid #475569;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        
+        .debug-header {
+            background: #0f172a;
+            padding: 0.75rem 1rem;
+            font-weight: 600;
+            font-size: 0.85rem;
+            color: #94a3b8;
+        }
+        
+        .debug-console {
+            padding: 1rem;
+            font-family: 'Courier New', monospace;
+            font-size: 0.75rem;
+            color: #cbd5e1;
+            max-height: 300px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+    </style>
+</head>
+<body>
+    <div class="share-container">
+        <h4><i class="bi bi-share me-2"></i>Share to FileRoom</h4>
+        
+        <div class="share-info" id="shareInfo">
+            <i class="bi bi-hourglass-split"></i> Loading shared content...
+        </div>
+
+        <button class="btn-action btn-primary-action" onclick="createNewRoom()" id="newRoomBtn">
+            <i class="bi bi-plus-circle me-2"></i>Create New Room
+        </button>
+
+        <div class="divider">or</div>
+
+        <input
+            id="roomCodeInput"
+            class="room-code-input"
+            type="text"
+            maxlength="6"
+            placeholder="Enter Room Code"
+            oninput="this.value = this.value.toUpperCase()"
+            onkeydown="if(event.key === 'Enter') joinExistingRoom()"
+        >
+        <button class="btn-action btn-secondary-action" onclick="joinExistingRoom()" id="joinRoomBtn">
+            <i class="bi bi-door-open me-2"></i>Join Existing Room
+        </button>
+
+        <div class="recent-rooms" id="recentRoomsContainer" style="display: none;">
+            <h6><i class="bi bi-clock-history"></i> Recent Rooms (on this device):</h6>
+            <div id="recentRoomsList"></div>
+        </div>
+
+        <div id="status"></div>
+        
+        <div class="upload-progress" id="uploadProgress">
+            <div id="progressList"></div>
+        </div>
+    </div>
+    
+    <!-- Debug Console -->
+    <div class="debug-panel" id="debugPanel" style="display: none;">
+        <div class="debug-header">
+            🐛 DEBUG LOG
+        </div>
+        <div class="debug-console" id="debugConsole"></div>
+    </div>
+
+    <script>
+        'use strict';
+        
+        // ====================================================================
+        // DEBUG LOGGING
+        // ====================================================================
+        
+        const debugLogs = [];
+        
+        function debugLog(...args) {
+            const msg = args.map(a => {
+                if (typeof a === 'object') {
+                    return JSON.stringify(a, null, 2);
+                }
+                return String(a);
+            }).join(' ');
+            
+            console.log(...args);
+            
+            const timestamp = new Date().toLocaleTimeString();
+            debugLogs.push(`[${timestamp}] ${msg}`);
+            
+            const debugPanel = document.getElementById('debugPanel');
+            const debugEl = document.getElementById('debugConsole');
+            if (debugPanel && debugEl) {
+                debugPanel.style.display = 'block';
+                debugEl.textContent = debugLogs.join('\n\n');
+                debugEl.scrollTop = debugEl.scrollHeight;
+            }
+        }
+        
+        // ====================================================================
+        // STATE
+        // ====================================================================
+        
+        const shareSessionId = "{{ sharesessionid }}";
+        const statusEl = document.getElementById('status');
+        const shareInfoEl = document.getElementById('shareInfo');
+        const uploadProgressEl = document.getElementById('uploadProgress');
+        const progressListEl = document.getElementById('progressList');
+        
+        let shareData = null;
+        let isProcessing = false;
+        
+        // ====================================================================
+        // INITIALIZATION
+        // ====================================================================
+        
+        debugLog('═══════════════════════════════════');
+        debugLog('PWA SHARE HANDLER - REFACTORED');
+        debugLog('═══════════════════════════════════');
+        debugLog('Session ID:', shareSessionId);
+        debugLog('User Agent:', navigator.userAgent.substring(0, 80));
+        
+        if (!shareSessionId || shareSessionId === '' || shareSessionId === 'None' || shareSessionId === 'undefined') {
+            debugLog('❌ FATAL: Invalid session ID');
+            showStatus('Invalid share session. Please try sharing again.', 'error');
+            disableButtons();
+        } else {
+            debugLog('✅ Session ID valid - loading data');
+            loadShareData();
+        }
+        
+        // ====================================================================
+        // UI HELPERS
+        // ====================================================================
+        
+        function showStatus(message, type = 'info') {
+            statusEl.textContent = message;
+            statusEl.className = type === 'error' ? 'status-error' : (type === 'success' ? 'status-success' : '');
+            debugLog(`📢 ${type.toUpperCase()}: ${message}`);
+        }
+        
+        function disableButtons() {
+            document.getElementById('newRoomBtn').disabled = true;
+            document.getElementById('joinRoomBtn').disabled = true;
+        }
+        
+        function enableButtons() {
+            document.getElementById('newRoomBtn').disabled = false;
+            document.getElementById('joinRoomBtn').disabled = false;
+        }
+        
+        function setLoading(isLoading, buttonId) {
+            const button = document.getElementById(buttonId);
+            if (isLoading) {
+                button.disabled = true;
+                button.innerHTML = `<span class="spinner"></span> ${buttonId === 'newRoomBtn' ? 'Creating...' : 'Joining...'}`;
+            } else {
+                button.disabled = false;
+                button.innerHTML = buttonId === 'newRoomBtn' 
+                    ? '<i class="bi bi-plus-circle me-2"></i>Create New Room'
+                    : '<i class="bi bi-door-open me-2"></i>Join Existing Room';
+            }
+        }
+        
+        function addProgress(message, type = 'info') {
+            const item = document.createElement('div');
+            item.className = `progress-item ${type}`;
+            
+            const icon = type === 'success' ? 'check-circle' : 
+                         type === 'error' ? 'x-circle' : 
+                         'arrow-right';
+            
+            item.innerHTML = `<i class="bi bi-${icon}"></i>${message}`;
+            progressListEl.appendChild(item);
+            uploadProgressEl.classList.add('show');
+        }
+        
+        function clearProgress() {
+            progressListEl.innerHTML = '';
+            uploadProgressEl.classList.remove('show');
+        }
+        
+        // ====================================================================
+        // LOAD SHARE DATA
+        // ====================================================================
+        
+        async function loadShareData() {
+            try {
+                const url = `/api/share/${shareSessionId}`;
+                debugLog(`📡 GET ${url}`);
+                
+                const response = await fetch(url);
+                debugLog(`📥 HTTP ${response.status} ${response.statusText}`);
+                
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    debugLog(`❌ Error response: ${errorText}`);
+                    throw new Error(`HTTP ${response.status}`);
+                }
+                
+                shareData = await response.json();
+                debugLog('📦 Share data:', shareData);
+                
+                // Build info display
+                let infoHtml = '<strong>Sharing:</strong><br>';
+                
+                if (shareData.files && shareData.files.length > 0) {
+                    const totalSize = shareData.files.reduce((sum, f) => sum + f.size, 0);
+                    const sizeMB = (totalSize / (1024 * 1024)).toFixed(2);
+                    infoHtml += `<i class="bi bi-file-earmark"></i> ${shareData.files.length} file(s) (${sizeMB} MB)`;
+                    if (shareData.text || shareData.url) infoHtml += '<br>';
+                }
+                
+                if (shareData.text) {
+                    const preview = shareData.text.substring(0, 50);
+                    infoHtml += `<i class="bi bi-chat-text"></i> Text: "${preview}${shareData.text.length > 50 ? '...' : ''}"`;
+                    if (shareData.url) infoHtml += '<br>';
+                }
+                
+                if (shareData.url) {
+                    infoHtml += `<i class="bi bi-link"></i> Link: ${shareData.url}`;
+                }
+                
+                if (shareData.age_seconds) {
+                    const ageMin = Math.floor(shareData.age_seconds / 60);
+                    const ageSec = Math.floor(shareData.age_seconds % 60);
+                    infoHtml += `<br><small class="text-muted">Age: ${ageMin}m ${ageSec}s</small>`;
+                }
+                
+                shareInfoEl.innerHTML = infoHtml;
+                loadRecentRooms();
+                
+            } catch (error) {
+                debugLog('❌ FATAL:', error.message);
+                showStatus('Share session expired. Please try sharing again.', 'error');
+                shareInfoEl.innerHTML = '<i class="bi bi-exclamation-triangle"></i> Session expired';
+                disableButtons();
+            }
+        }
+        
+        // ====================================================================
+        // ROOM ACTIONS
+        // ====================================================================
+        
+        async function createNewRoom() {
+            if (isProcessing) return;
+            isProcessing = true;
+            
+            debugLog('═══════════════════════════════════');
+            debugLog('🆕 CREATE NEW ROOM');
+            disableButtons();
+            setLoading(true, 'newRoomBtn');
+            showStatus('Creating new room...');
+            clearProgress();
+
+            try {
+                const roomCode = generateRoomCode();
+                debugLog(`🎲 Generated room code: ${roomCode}`);
+                await uploadToRoom(roomCode);
+            } catch (error) {
+                debugLog(`❌ FAILED: ${error.message}`);
+                showStatus(`Failed: ${error.message}`, 'error');
+                addProgress(error.message, 'error');
+                enableButtons();
+                setLoading(false, 'newRoomBtn');
+                isProcessing = false;
+            }
+        }
+
+        async function joinExistingRoom() {
+            if (isProcessing) return;
+            
+            const roomCode = document.getElementById('roomCodeInput').value.trim().toUpperCase();
+            
+            if (roomCode.length !== 6) {
+                showStatus('Please enter a 6-character room code.', 'error');
+                return;
+            }
+
+            isProcessing = true;
+            debugLog('═══════════════════════════════════');
+            debugLog(`🚪 JOIN EXISTING ROOM: ${roomCode}`);
+            disableButtons();
+            setLoading(true, 'joinRoomBtn');
+            showStatus('Joining room...');
+            clearProgress();
+
+            try {
+                await uploadToRoom(roomCode);
+            } catch (error) {
+                debugLog(`❌ FAILED: ${error.message}`);
+                showStatus(`Failed: ${error.message}`, 'error');
+                addProgress(error.message, 'error');
+                enableButtons();
+                setLoading(false, 'joinRoomBtn');
+                isProcessing = false;
+            }
+        }
+
+        async function selectRecentRoom(roomCode) {
+            if (isProcessing) return;
+            isProcessing = true;
+
+            debugLog('═══════════════════════════════════');
+            debugLog(`⏱️  RECENT ROOM: ${roomCode}`);
+            disableButtons();
+            showStatus(`Uploading to ${roomCode}...`);
+            clearProgress();
+
+            try {
+                await uploadToRoom(roomCode);
+            } catch (error) {
+                debugLog(`❌ FAILED: ${error.message}`);
+                showStatus(`Failed: ${error.message}`, 'error');
+                addProgress(error.message, 'error');
+                enableButtons();
+                isProcessing = false;
+            }
+        }
+        
+        // ====================================================================
+        // UPLOAD TO ROOM (MAIN LOGIC)
+        // ====================================================================
+        
+        async function uploadToRoom(roomCode) {
+            debugLog(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+            debugLog(`UPLOAD TO ROOM: ${roomCode}`);
+            
+            addProgress(`Joining room ${roomCode}...`);
+            
+            // Step 1: Join room or create user
+            const storageKey = `fileroom_user_${roomCode}`;
+            let currentUser = null;
+            
+            const stored = localStorage.getItem(storageKey);
+            if (stored) {
+                try {
+                    currentUser = JSON.parse(stored);
+                    debugLog('💾 Cached user:', currentUser);
+                } catch (e) {
+                    debugLog('⚠️  Parse error:', e.message);
+                }
+            }
+            
+            // Build join params
+            const joinParams = new URLSearchParams();
+            if (currentUser?.id) joinParams.append('user_id', currentUser.id);
+            if (currentUser?.name) joinParams.append('user_name', currentUser.name);
+            
+            const joinUrl = `/api/join/${roomCode}?${joinParams.toString()}`;
+            debugLog(`📡 GET ${joinUrl}`);
+            
+            const joinResponse = await fetch(joinUrl);
+            debugLog(`📥 HTTP ${joinResponse.status} ${joinResponse.statusText}`);
+            
+            if (!joinResponse.ok) {
+                const errorText = await joinResponse.text();
+                debugLog(`❌ Response: ${errorText}`);
+                throw new Error(`Failed to join room: HTTP ${joinResponse.status}`);
+            }
+            
+            const joinData = await joinResponse.json();
+            debugLog('📦 Join data:', joinData);
+            
+            if (!joinData.success) {
+                throw new Error('Join failed');
+            }
+            
+            // Extract user info
+            const userId = joinData.user_id || joinData.userid || joinData.id;
+            const userName = joinData.user_name || joinData.username || joinData.name;
+            
+            if (!userId) {
+                throw new Error('No user ID in response');
+            }
+            
+            currentUser = { id: userId, name: userName };
+            localStorage.setItem(storageKey, JSON.stringify(currentUser));
+            debugLog(`✅ User: ${userName} (${userId})`);
+            
+            addProgress(`Joined as ${userName}`, 'success');
+            saveRecentRoom(roomCode);
+            
+            // Step 2: Upload shared content
+            addProgress('Uploading shared content...');
+            
+            const uploadUrl = `/api/share/${shareSessionId}/upload/${roomCode}?user_id=${encodeURIComponent(userId)}`;
+            debugLog(`📡 POST ${uploadUrl}`);
+            
+            const uploadResponse = await fetch(uploadUrl, { method: 'POST' });
+            debugLog(`📥 HTTP ${uploadResponse.status}`);
+            
+            if (!uploadResponse.ok) {
+                const errorText = await uploadResponse.text();
+                debugLog(`❌ Response: ${errorText}`);
+                throw new Error(`Upload failed: HTTP ${uploadResponse.status}`);
+            }
+            
+            const result = await uploadResponse.json();
+            debugLog('📦 Upload result:', result);
+            
+            if (result.success) {
+                debugLog(`✅ SUCCESS! Uploaded ${result.uploaded.length} items`);
+                
+                // Show detailed progress
+                if (result.uploaded_files !== undefined) {
+                    addProgress(`Uploaded ${result.uploaded_files} file(s)`, 'success');
+                }
+                
+                if (result.warning) {
+                    addProgress(result.warning, 'error');
+                }
+                
+                showStatus(`✓ Uploaded ${result.uploaded.length} item(s)!`, 'success');
+                addProgress('Redirecting to room...', 'success');
+                
+                debugLog('🔄 Redirecting in 1000ms...');
+                setTimeout(() => {
+                    window.location.href = `/room/${roomCode}`;
+                }, 1000);
+            } else {
+                throw new Error(result.message || 'Upload failed');
+            }
+        }
+        
+        // ====================================================================
+        // UTILITY FUNCTIONS
+        // ====================================================================
+        
+        function generateRoomCode() {
+            const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+            return Array.from({ length: 6 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
+        }
+
+        function saveRecentRoom(roomCode) {
+            try {
+                let recent = JSON.parse(localStorage.getItem('fileroom_recent_rooms') || '[]');
+                recent = recent.filter(r => r !== roomCode);
+                recent.unshift(roomCode);
+                recent = recent.slice(0, 5);
+                localStorage.setItem('fileroom_recent_rooms', JSON.stringify(recent));
+                debugLog(`💾 Saved to recent: ${roomCode}`);
+            } catch (e) {
+                debugLog(`⚠️  Save recent failed: ${e.message}`);
+            }
+        }
+
+        function loadRecentRooms() {
+            try {
+                const recent = JSON.parse(localStorage.getItem('fileroom_recent_rooms') || '[]');
+                debugLog(`📋 Recent rooms: ${JSON.stringify(recent)}`);
+                
+                if (recent.length > 0) {
+                    const container = document.getElementById('recentRoomsContainer');
+                    const listEl = document.getElementById('recentRoomsList');
+                    
+                    listEl.innerHTML = recent.map(roomCode => `
+                        <div class="recent-room-item" onclick="selectRecentRoom('${roomCode}')">
+                            <span><i class="bi bi-clock-history me-2"></i>${roomCode}</span>
+                            <i class="bi bi-arrow-right"></i>
+                        </div>
+                    `).join('');
+                    
+                    container.style.display = 'block';
+                }
+            } catch (e) {
+                debugLog(`⚠️  Load recent failed: ${e.message}`);
+            }
+        }
+    </script>
+</body>
+</html>

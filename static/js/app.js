@@ -12,10 +12,10 @@ let installButton = null;
 // Register Service Worker
 if ('serviceWorker' in navigator) {
     window.addEventListener('load', () => {
-        navigator.serviceWorker.register('/static/sw.js')
+        navigator.serviceWorker.register('/static/js/sw.js')
             .then(registration => {
                 console.log('Service Worker registered:', registration.scope);
-                
+
                 // Check for updates
                 registration.addEventListener('updatefound', () => {
                     const newWorker = registration.installing;
@@ -61,7 +61,7 @@ window.addEventListener('appinstalled', () => {
 
 function showInstallButton() {
     if (!deferredPrompt) return;
-    
+
     if (!installButton) {
         const chatHeader = document.querySelector('.chat-header');
         if (chatHeader) {
@@ -73,7 +73,7 @@ function showInstallButton() {
                 e.stopPropagation();
                 installPWA();
             };
-            
+
             const qrBtn = chatHeader.querySelector('.btn-qr');
             if (qrBtn) {
                 chatHeader.insertBefore(installButton, qrBtn);
@@ -97,7 +97,7 @@ async function installPWA() {
         showToast('Installation not available', 'warning');
         return;
     }
-    
+
     try {
         deferredPrompt.prompt();
         const { outcome } = await deferredPrompt.userChoice;
@@ -157,20 +157,18 @@ const path = window.location.pathname;
 roomCode = path.split('/room/')[1];
 
 // Initialize
-document.addEventListener('DOMContentLoaded', function() {
+// Initialize
+document.addEventListener('DOMContentLoaded', async function () {
     if (!roomCode) return;
 
     console.log('Initializing Perfect FileRoom for room:', roomCode);
 
     loadTheme();
-    initUser();
+    await initUser();  // ← WAIT for user initialization
     setupUI();
     scrollToBottom();
     initializeMaps();
     setupDragAndDrop();
-    
-    // Handle shared content from PWA Share Target
-    await handleSharedContent();
 
     // Heartbeat
     setInterval(() => {
@@ -180,6 +178,7 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     }, 30000);
 });
+
 
 // User initialization
 async function initUser() {
@@ -232,78 +231,39 @@ async function initUser() {
     } catch (error) {
         console.error('Init user failed:', error);
 
-        currentUser = {
-            id: 'anon-' + Date.now(),
-            name: 'Anonymous'
-        };
-    }
-}
+        // Create fallback user
+        const fallbackId = `anon-${Date.now()}`;
+        const fallbackName = 'Anonymous';
 
+        // Attempt to register fallback user with backend
+        try {
+            const fallbackUrl = `/api/join/${roomCode}?user_id=${encodeURIComponent(fallbackId)}&user_name=${encodeURIComponent(fallbackName)}`;
+            const fallbackResponse = await fetch(fallbackUrl, { method: 'GET' });
 
-// Handle shared content from PWA Share Target
-async function handleSharedContent() {
-    const urlParams = new URLSearchParams(window.location.search);
-    const shareSessionId = urlParams.get('share');
-    
-    if (!shareSessionId) {
-        return; // No shared content
-    }
-    
-    console.log('Processing shared content, session:', shareSessionId);
-    
-    try {
-        // Get share session data
-        const response = await fetch(`/api/share/${shareSessionId}`);
-        
-        if (!response.ok) {
-            console.error('Share session not found or expired');
-            showToast('Shared content expired', 'error');
-            // Clean URL
-            window.history.replaceState({}, document.title, window.location.pathname);
-            return;
-        }
-        
-        const shareData = await response.json();
-        console.log('Share data:', shareData);
-        
-        // Show notification to user
-        let shareMessage = 'Processing shared content...';
-        if (shareData.files && shareData.files.length > 0) {
-            shareMessage = `Uploading ${shareData.files.length} shared file(s)...`;
-        } else if (shareData.text || shareData.url) {
-            shareMessage = 'Adding shared content...';
-        }
-        
-        showToast(shareMessage, 'info');
-        
-        // Upload to current room
-        if (currentUser && roomCode) {
-            const uploadResponse = await fetch(
-                `/api/share/${shareSessionId}/upload/${roomCode}?user_id=${currentUser.id}`,
-                { method: 'POST' }
-            );
-            
-            if (uploadResponse.ok) {
-                const result = await uploadResponse.json();
-                showToast(`✓ Shared ${result.uploaded.length} item(s)`, 'success');
-                
-                // Refresh to show new messages
-                await refreshData();
-            } else {
-                showToast('Failed to upload shared content', 'error');
+            if (fallbackResponse.ok) {
+                const fallbackData = await fallbackResponse.json();
+                if (fallbackData.success) {
+                    currentUser = {
+                        id: fallbackData.user_id,
+                        name: fallbackData.user_name
+                    };
+                    console.log('Fallback user registered:', currentUser.name);
+                    connectWebSocket();
+                    return;
+                }
             }
+        } catch (fallbackError) {
+            console.error('Fallback registration also failed:', fallbackError);
         }
-        
-        // Clean URL
-        window.history.replaceState({}, document.title, window.location.pathname);
-        
-    } catch (error) {
-        console.error('Error handling shared content:', error);
-        showToast('Error processing shared content', 'error');
-        
-        // Clean URL
-        window.history.replaceState({}, document.title, window.location.pathname);
+
+        // Last resort: use local-only fallback (will work but without websocket)
+        currentUser = {
+            id: fallbackId,
+            name: fallbackName
+        };
+        console.warn('Using unregistered fallback user - some features may not work');
     }
+
 }
 
 
@@ -317,7 +277,7 @@ function connectWebSocket() {
     try {
         websocket = new WebSocket(wsUrl);
 
-        websocket.onopen = function() {
+        websocket.onopen = function () {
             console.log('WebSocket connected');
 
             setInterval(() => {
@@ -327,7 +287,7 @@ function connectWebSocket() {
             }, 30000);
         };
 
-        websocket.onmessage = function(event) {
+        websocket.onmessage = function (event) {
             try {
                 const data = JSON.parse(event.data);
                 handleWebSocketMessage(data);
@@ -336,11 +296,11 @@ function connectWebSocket() {
             }
         };
 
-        websocket.onerror = function(error) {
+        websocket.onerror = function (error) {
             console.error('WebSocket error:', error);
         };
 
-        websocket.onclose = function() {
+        websocket.onclose = function () {
             console.log('WebSocket disconnected');
             websocket = null;
 
@@ -419,31 +379,31 @@ function setupDragAndDrop() {
     }
 
     // Highlight drop area when item is dragged over it
-    document.body.addEventListener('dragenter', function(e) {
+    document.body.addEventListener('dragenter', function (e) {
         dragCounter++;
         if (e.dataTransfer.types.includes('Files')) {
             mainChat.classList.add('drag-over');
         }
     }, false);
 
-    document.body.addEventListener('dragleave', function(e) {
+    document.body.addEventListener('dragleave', function (e) {
         dragCounter--;
         if (dragCounter === 0) {
             mainChat.classList.remove('drag-over');
         }
     }, false);
 
-    document.body.addEventListener('dragover', function(e) {
+    document.body.addEventListener('dragover', function (e) {
         if (e.dataTransfer.types.includes('Files')) {
             e.dataTransfer.dropEffect = 'copy';
         }
     }, false);
 
     // Handle dropped files
-    document.body.addEventListener('drop', function(e) {
+    document.body.addEventListener('drop', function (e) {
         dragCounter = 0;
         mainChat.classList.remove('drag-over');
-        
+
         const files = Array.from(e.dataTransfer.files);
         if (files.length > 0) {
             handleDroppedFiles(files);
@@ -453,19 +413,19 @@ function setupDragAndDrop() {
 
 function handleDroppedFiles(files) {
     if (!files || files.length === 0) return;
-    
+
     console.log(`Dropped ${files.length} files`);
-    
+
     // Separate images from other files
     const imageFiles = files.filter(f => f.type.startsWith('image/'));
     const otherFiles = files.filter(f => !f.type.startsWith('image/'));
-    
+
     // Upload images as 'image' type
     if (imageFiles.length > 0) {
         console.log(`Uploading ${imageFiles.length} images`);
         uploadFiles(imageFiles, 'image');
     }
-    
+
     // Upload other files as 'file' type
     if (otherFiles.length > 0) {
         console.log(`Uploading ${otherFiles.length} files`);
@@ -481,7 +441,7 @@ function setupUI() {
     const photoInput = document.getElementById('photoInput');
 
     if (fileInput) {
-        fileInput.addEventListener('change', function(e) {
+        fileInput.addEventListener('change', function (e) {
             console.log('File input changed:', this.files.length);
             if (this.files && this.files.length > 0) {
                 uploadFiles(Array.from(this.files), 'file');
@@ -490,7 +450,7 @@ function setupUI() {
     }
 
     if (photoInput) {
-        photoInput.addEventListener('change', function(e) {
+        photoInput.addEventListener('change', function (e) {
             console.log('Photo input changed:', this.files.length);
             if (this.files && this.files.length > 0) {
                 uploadFiles(Array.from(this.files), 'image');
@@ -507,14 +467,14 @@ function setupUI() {
     });
 
     // Hide attach menu when clicking outside
-    document.addEventListener('click', function(e) {
+    document.addEventListener('click', function (e) {
         const attachMenu = document.getElementById('attachMenu');
         const attachBtn = document.querySelector('.btn-attach');
         if (attachMenu && !attachMenu.contains(e.target) && e.target !== attachBtn && !attachBtn.contains(e.target)) {
             attachMenu.classList.remove('show');
         }
     });
-    
+
     // Focus management for mobile keyboards
     const messageInput = document.getElementById('messageInput');
     if (messageInput) {
@@ -649,7 +609,7 @@ async function startRecording(event) {
             const elapsed = Math.floor((Date.now() - recordingStartTime) / 1000);
             const minutes = Math.floor(elapsed / 60);
             const seconds = elapsed % 60;
-            document.getElementById('recordingTime').textContent = 
+            document.getElementById('recordingTime').textContent =
                 `${minutes}:${seconds.toString().padStart(2, '0')}`;
         }, 1000);
 
@@ -789,7 +749,7 @@ function addMessageToUI(msg) {
     if (msg.type === 'text') {
         // Process text for links
         const processedText = processTextWithLinks(msg.text);
-        const linkPreviews = msg.links && msg.links.length > 0 ? 
+        const linkPreviews = msg.links && msg.links.length > 0 ?
             `<div class="link-previews">
                 ${msg.links.map(link => `
                     <div class="link-preview">
@@ -1242,37 +1202,37 @@ async function deleteAllRoomData() {
         showToast('User not initialized', 'warning');
         return;
     }
-    
+
     const confirmMsg = 'Are you sure you want to delete ALL messages and files in this room? This cannot be undone!';
     if (!confirm(confirmMsg)) return;
-    
+
     try {
         showToast('Deleting all data...', 'info');
-        
+
         const response = await fetch(`/api/room/${roomCode}/all`, {
             method: 'DELETE'
         });
-        
+
         if (!response.ok) {
             throw new Error('Delete all failed');
         }
-        
+
         const result = await response.json();
-        
+
         // Clear the messages container
         const container = document.getElementById('messagesContainer');
         if (container) {
             container.innerHTML = '';
         }
-        
+
         // Stop all audio players
         Object.keys(audioPlayers).forEach(id => {
             audioPlayers[id].pause();
         });
         audioPlayers = {};
-        
+
         showToast(`Deleted ${result.count} messages`, 'success');
-        
+
     } catch (error) {
         console.error('Delete all error:', error);
         showToast('Failed to delete all data', 'danger');
@@ -1283,28 +1243,28 @@ async function deleteAllRoomData() {
 // Download all files from the room
 async function downloadAllFiles() {
     const fileMessages = document.querySelectorAll('.message.file, .message.image, .message.voice');
-    
+
     if (fileMessages.length === 0) {
         showToast('No files to download', 'info');
         return;
     }
-    
+
     showToast(`Downloading ${fileMessages.length} file(s)...`, 'info');
-    
+
     const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
     let downloadCount = 0;
-    
+
     for (const msgEl of fileMessages) {
         try {
             const fileInfo = msgEl.querySelector('.file-info');
             const filename = fileInfo ? fileInfo.querySelector('.fw-semibold').textContent : 'file';
             const downloadLink = msgEl.querySelector('.btn-download, [onclick*="downloadFile"]');
-            
+
             if (downloadLink) {
                 let downloadUrl = null;
                 const href = downloadLink.getAttribute('href');
                 const onclick = downloadLink.getAttribute('onclick');
-                
+
                 if (href) {
                     downloadUrl = href;
                 } else if (onclick && onclick.includes('downloadFile')) {
@@ -1313,7 +1273,7 @@ async function downloadAllFiles() {
                         downloadUrl = match[1];
                     }
                 }
-                
+
                 if (downloadUrl) {
                     downloadFile(downloadUrl, filename);
                     downloadCount++;
@@ -1324,7 +1284,7 @@ async function downloadAllFiles() {
             console.error('Download error:', error);
         }
     }
-    
+
     showToast(`Started downloading ${downloadCount} file(s)`, 'success');
 }
 
@@ -1413,27 +1373,27 @@ function closeRoomChangeModal() {
 
 async function switchRoom() {
     const newRoom = document.getElementById('newRoomInput').value.toUpperCase();
-    
+
     if (!newRoom || newRoom.length !== 6) {
         showToast('Invalid room code (must be 6 characters)', 'warning');
         return;
     }
-    
+
     if (!currentUser) {
         showToast('User not initialized', 'warning');
         return;
     }
-    
+
     try {
         const response = await fetch(
             `/api/room/change?current_room=${encodeURIComponent(roomCode)}&new_room=${encodeURIComponent(newRoom)}&user_id=${encodeURIComponent(currentUser.id)}`,
             { method: 'POST' }
         );
-        
+
         if (!response.ok) {
             throw new Error('Failed to change room');
         }
-        
+
         const data = await response.json();
         if (data.success) {
             window.location.href = data.redirect_url;
@@ -1447,7 +1407,7 @@ async function switchRoom() {
 }
 
 // Allow Enter to switch room
-document.addEventListener('keydown', function(e) {
+document.addEventListener('keydown', function (e) {
     const modal = document.getElementById('roomChangeModal');
     if (modal && modal.classList.contains('show') && e.key === 'Enter') {
         switchRoom();
@@ -1455,7 +1415,7 @@ document.addEventListener('keydown', function(e) {
 });
 
 // Close modal when clicking outside
-document.getElementById('roomChangeModal')?.addEventListener('click', function(e) {
+document.getElementById('roomChangeModal')?.addEventListener('click', function (e) {
     if (e.target === this) {
         closeRoomChangeModal();
     }
