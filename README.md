@@ -1,6 +1,6 @@
 # FileRoom
 
-![Version](https://img.shields.io/badge/Version-1.0.0-blue.svg)
+![Version](https://img.shields.io/badge/Version-2.0.0-blue.svg)
 ![Docker](https://img.shields.io/badge/Dockerized-yes-green.svg)
 ![License](https://img.shields.io/badge/License-MIT-green.svg)
 ![Lightweight](https://img.shields.io/badge/RAM_requirements-100_MB_+_in_RAM_storage-green.svg)
@@ -13,7 +13,9 @@ Share files, images, voice messages, and locations instantly in temporary rooms 
 
 ### Core Messaging
 - **Text Messages** - Send messages with automatic link detection and highlighting
-- **File Sharing** - Upload any file type up to 100MB
+- **File Sharing** - Upload any number of files (any type, up to 100MB each) with progress and cancel
+- **Share Out** - Share one, several or all files/messages to other apps (Web Share API), or download them as a ZIP
+- **Share In** - Installed app appears in the system share sheet; text, links and multiple files go to a room of your choice
 - **Image Sharing** - Take photos or upload from gallery with click-to-expand previews
 - **Voice Messages** - Record and send voice messages with custom audio player
 - **Location Sharing** - Share your GPS position with interactive OpenStreetMap integration
@@ -33,10 +35,14 @@ Share files, images, voice messages, and locations instantly in temporary rooms 
 - **Auto-cleanup** - Inactive users automatically removed after 60 seconds
 
 ### Progressive Web App
-- **Installable** - Add to home screen on mobile and desktop
-- **Offline Ready** - Service worker caches static assets
-- **App-like Experience** - Runs in standalone mode without browser UI
-- **Fast Loading** - Cached resources load instantly
+- **Installable** - "Install app" button (sidebar → *App & Updates*) or platform-specific instructions (iOS, Samsung, Firefox, …)
+- **App shell offline** - All code, styles, icons and libraries are self-hosted and cached; the app opens offline and reconnects automatically
+- **Staged, verified updates** - A new release is downloaded completely and every file is checked against its SHA-256 checksum. The running version stays active until you tap **Restart** in the update banner (or **Later**). Updates are checked at start, when the app returns to the foreground, when the network comes back and every 30 minutes.
+- **Reopens your last room** when launched from the home screen
+
+### Room names
+Any room name with **1–64 characters** (configurable) is a valid room: letters of any alphabet, digits, `-` and `_`.
+Names are case-insensitive (`team` = `TEAM`) and spaces become `-` (`my team` → `MY-TEAM`). Random rooms still get a 6-character code.
 
 ## Screenshots
 
@@ -59,7 +65,7 @@ cd fileroom
 chmod +x setup.sh
 ./setup.sh
 
-# Access at http://localhost:8000
+# Access at http://localhost:8181
 ```
 
 ### Manual Installation
@@ -89,11 +95,21 @@ uvicorn main:app --host 0.0.0.0 --port 8000
 3. Share the room code or QR code with others
 
 ### Sending Messages
-- **Text**: Type in the input field and press Enter or click send
-- **Files**: Click the plus button and select "File"
-- **Photos**: Click the plus button and select "Photo" (camera or gallery)
+- **Text**: Type and press Enter (Shift+Enter for a new line) or click send
+- **Files**: Plus button → "Files" (multiple), drag & drop, or paste
+- **Photos/Videos**: Plus button → "Photos & Videos" (gallery, multiple) or "Camera"
 - **Voice**: Hold the microphone button to record, release to send
 - **Location**: Click the plus button and select "Location"
+
+### Sharing files out of FileRoom
+- Every message has a **share** button (on browsers with the Web Share API, e.g. Android/iOS) and files a **download** button
+- Tap the **select** button in the header to pick several messages, then **Share**, **Save** (ZIP for multiple files) or **Delete**
+- Sidebar: **Share All Files** and **Download All (ZIP)**
+- File types a browser refuses to share (e.g. ZIP on Android Chrome) are downloaded instead
+
+### Sharing into FileRoom
+Install the app, then use the system share sheet in any app (gallery, files, browser …) and choose FileRoom.
+You can pick a recent room, type any room name or create a new room.
 
 ### Message Features
 - **Images**: Click any image to view full-screen with download option
@@ -112,9 +128,6 @@ Potential features being considered for future releases:
 - **End-to-end encryption** for enhanced privacy
 - **Screen sharing** for collaborative sessions
 - **Video messages** with preview thumbnails
-- **Drag and drop** file upload support
-- **Multiple room management** for power users
-- **Custom room names** instead of random codes
 - **Room expiry settings** (30min, 2h, 4h options)
 - **Read receipts** to see who has seen messages
 - **Typing indicators** for real-time presence
@@ -139,17 +152,28 @@ This is a convenience tool for temporary sharing, not a secure messaging platfor
 ### Environment Variables
 
 ```bash
-# Server Configuration
-HOST=0.0.0.0
-PORT=8000
-
-# Storage Configuration
-UPLOAD_DIR=uploads
-MAX_FILE_SIZE=104857600  # 100MB in bytes
-
-# Message Configuration
+UPLOAD_DIR=uploads             # where files are stored (tmpfs in Docker)
+MAX_FILE_SIZE=104857600        # per file, bytes (100MB)
+MAX_SHARE_SIZE=524288000       # total of one incoming share from another app, bytes
 MESSAGE_EXPIRY_HOURS=1
 USER_TIMEOUT_SECONDS=60
+SHARE_SESSION_MINUTES=15       # time to pick a room for incoming shares
+MAX_ROOM_CODE_LENGTH=64
+```
+
+The app version lives in the `VERSION` file. The service worker, `version.json` and the build hash are generated
+by the server on start from the current files, so every deployment with changed files is offered to installed
+apps as an update automatically.
+
+**HTTPS is required** for installation, offline mode, sharing and updates (except on `localhost`).
+Behind a reverse proxy make sure `/sw.js`, `/version.json` and the manifest are not cached, and that the
+upload limit for `/share` covers several files at once (see `nginx-example.conf`).
+
+### Tests
+
+```bash
+pip install -r requirements.txt pytest httpx
+pytest -q
 ```
 
 ### Docker Deployment

@@ -1,62 +1,49 @@
 <!DOCTYPE html>
-<html lang="de" data-theme="dark">
+<html lang="en" data-theme="dark">
 
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport"
-        content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content">
+    <meta name="app-version" content="{{ version }}">
+    <meta name="app-build" content="{{ build }}">
+    <meta name="max-file-size" content="{{ max_file_size }}">
+    <meta name="max-room-code-length" content="{{ max_room_code_length }}">
 
-    <!-- PWA Meta Tags -->
-    <meta name="apple-mobile-web-app-capable" content="yes">
+    <!-- PWA -->
     <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="apple-mobile-web-app-title" content="FileRoom">
     <meta name="application-name" content="FileRoom">
-    <meta name="theme-color" content="#2563eb">
-    <meta name="description"
-        content="Share files, messages, and locations in temporary rooms that auto-delete after 1 hour">
-
-    <!-- PWA Manifest -->
-    <link rel="manifest" href="/manifest.json">
-
-    <!-- iOS Icons -->
-    <link rel="apple-touch-icon" sizes="72x72" href="/static/icons/icon-72x72.png">
-    <link rel="apple-touch-icon" sizes="96x96" href="/static/icons/icon-96x96.png">
-    <link rel="apple-touch-icon" sizes="128x128" href="/static/icons/icon-128x128.png">
-    <link rel="apple-touch-icon" sizes="144x144" href="/static/icons/icon-144x144.png">
-    <link rel="apple-touch-icon" sizes="152x152" href="/static/icons/icon-152x152.png">
-    <link rel="apple-touch-icon" sizes="192x192" href="/static/icons/icon-192x192.png">
-    <link rel="apple-touch-icon" sizes="384x384" href="/static/icons/icon-384x384.png">
-    <link rel="apple-touch-icon" sizes="512x512" href="/static/icons/icon-512x512.png">
-
-    <!-- Favicon -->
+    <meta name="theme-color" content="#1e293b">
+    <meta name="description" content="Share files, messages, voice notes and locations in temporary rooms that auto-delete">
+    <link rel="manifest" href="/manifest.webmanifest">
+    <link rel="apple-touch-icon" href="/static/icons/icon-192x192.png">
     <link rel="icon" type="image/x-icon" href="/static/images/favicon.ico">
-    <link rel="shortcut icon" type="image/x-icon" href="/static/images/favicon.ico">
 
-    <title>FileRoom - {{ room_code }}</title>
+    <title>FileRoom</title>
 
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css" rel="stylesheet">
-    <link rel="stylesheet" href="/static/css/styles.css">
-
-    <!-- Leaflet for maps -->
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <link rel="stylesheet" href="/static/vendor/bootstrap/bootstrap.min.css?v={{ build }}">
+    <link rel="stylesheet" href="/static/vendor/bootstrap-icons/bootstrap-icons.min.css?v={{ build }}">
+    <link rel="stylesheet" href="/static/vendor/leaflet/leaflet.css?v={{ build }}">
+    <link rel="stylesheet" href="/static/css/styles.css?v={{ build }}">
 </head>
 
 <body>
     <!-- Image Preview Modal -->
-    <div class="image-modal" id="imageModal">
-        <div class="image-modal-backdrop" onclick="closeImageModal()"></div>
+    <div class="image-modal" id="imageModal" role="dialog" aria-modal="true">
+        <div class="image-modal-backdrop" data-action="close-image"></div>
         <div class="image-modal-content">
             <div class="image-modal-header">
-                <span id="imageModalTitle">Image Preview</span>
+                <span id="imageModalTitle" class="text-truncate">Image Preview</span>
                 <div>
-                    <button class="btn-modal-download" id="imageModalDownload">
+                    <button class="btn-modal-download" id="imageModalShare" title="Share">
+                        <i class="bi bi-share"></i>
+                    </button>
+                    <button class="btn-modal-download" id="imageModalDownload" title="Download">
                         <i class="bi bi-download"></i>
                     </button>
-                    <button class="btn-modal-close" onclick="closeImageModal()">
+                    <button class="btn-modal-close" data-action="close-image" title="Close">
                         <i class="bi bi-x-lg"></i>
                     </button>
                 </div>
@@ -68,56 +55,63 @@
     </div>
 
     <!-- QR Code Modal -->
-    <div class="qr-modal" id="qrModal">
+    <div class="qr-modal" id="qrModal" role="dialog" aria-modal="true">
         <div class="qr-modal-content">
             <div class="qr-modal-header">
                 <h5><i class="bi bi-qr-code me-2"></i>Share Room</h5>
-                <button class="btn-close-modal" onclick="closeQR()">
+                <button class="btn-close-modal" data-action="close-qr" title="Close">
                     <i class="bi bi-x-lg"></i>
                 </button>
             </div>
             <div class="qr-modal-body">
-                {% if qr_code %}
-                <img src="{{ qr_code }}" class="qr-image" alt="QR Code">
-                {% endif %}
-                <div class="room-code-display">{{ room_code }}</div>
+                <img id="qrImage" class="qr-image" alt="QR code for this room">
+                <div class="room-code-display" id="qrRoomCode"></div>
                 <div class="share-url">
-                    <input type="text" id="shareUrl" value="{{ base_url }}/room/{{ room_code }}" readonly>
-                    <button onclick="copyShareUrl()" class="btn-copy">
+                    <input type="text" id="shareUrl" readonly>
+                    <button data-action="copy-url" class="btn-copy" title="Copy link">
                         <i class="bi bi-clipboard"></i>
+                    </button>
+                    <button data-action="share-url" class="btn-copy" id="shareUrlBtn" title="Share link">
+                        <i class="bi bi-share"></i>
                     </button>
                 </div>
             </div>
         </div>
     </div>
 
-    <div class="room-change-modal" id="roomChangeModal">
-        <div class="room-change-content">
+    <!-- Room Change Modal -->
+    <div class="room-change-modal" id="roomChangeModal" role="dialog" aria-modal="true">
+        <form class="room-change-content" id="roomChangeForm">
             <div class="room-change-header">
                 <h5><i class="bi bi-door-open me-2"></i>Change Room</h5>
-                <button class="btn-close-modal" onclick="closeRoomChangeModal()">
+                <button type="button" class="btn-close-modal" data-action="close-room-change" title="Close">
                     <i class="bi bi-x-lg"></i>
                 </button>
             </div>
             <div class="room-change-body">
-                <label>New Room Code:</label>
-                <input type="text" id="newRoomInput" placeholder="e.g., ABC123" maxlength="6"
-                    onkeyup="this.value = this.value.toUpperCase()">
-                <button class="btn btn-primary" onclick="switchRoom()" style="width: 100%; margin-top: 1rem;">
-                    <i class="bi bi-arrow-right me-2"></i>Switch Room
+                <label for="newRoomInput">Room name or code:</label>
+                <input type="text" id="newRoomInput" placeholder="e.g. ABC123 or TEAM-MEETING"
+                    maxlength="{{ max_room_code_length }}" autocomplete="off" autocapitalize="characters"
+                    spellcheck="false">
+                <small class="room-hint">Any length up to {{ max_room_code_length }} characters: letters, digits, “-” and “_”. Spaces become “-”.</small>
+                <button type="submit" class="btn btn-primary w-100 mt-3">
+                    <i class="bi bi-arrow-right me-2"></i>Go to Room
                 </button>
+                <button type="button" class="btn btn-outline-secondary w-100 mt-2" data-action="new-room">
+                    <i class="bi bi-plus-circle me-2"></i>New random room
+                </button>
+                <div class="recent-rooms mt-3" id="recentRooms"></div>
             </div>
-        </div>
+        </form>
     </div>
 
-
-
     <div class="chat-container">
+        <div class="sidebar-backdrop" data-action="toggle-sidebar"></div>
         <!-- Sidebar -->
-        <div class="sidebar" id="sidebar">
+        <aside class="sidebar" id="sidebar">
             <div class="sidebar-header">
                 <h6><i class="bi bi-people me-2"></i>Users</h6>
-                <button class="btn-close-sidebar" onclick="toggleSidebar()">
+                <button class="btn-close-sidebar" data-action="toggle-sidebar" title="Close">
                     <i class="bi bi-x-lg"></i>
                 </button>
             </div>
@@ -127,262 +121,136 @@
             </div>
 
             <div class="sidebar-footer">
-                <button class="btn btn-sm btn-outline-primary w-100 mb-2" onclick="changeName()">
+                <button class="btn btn-sm btn-outline-primary w-100 mb-2" data-action="change-name">
                     <i class="bi bi-pencil me-1"></i>Change Name
                 </button>
-
-                <button class="btn btn-sm btn-outline-danger w-100 mb-2" onclick="deleteAllRoomData()">
+                <button class="btn btn-sm btn-outline-info w-100 mb-2" data-action="share-all">
+                    <i class="bi bi-share me-1"></i>Share All Files
+                </button>
+                <button class="btn btn-sm btn-outline-info w-100 mb-2" data-action="download-all">
+                    <i class="bi bi-file-earmark-zip me-1"></i>Download All (ZIP)
+                </button>
+                <button class="btn btn-sm btn-outline-danger w-100 mb-2" data-action="delete-all">
                     <i class="bi bi-trash me-1"></i>Delete All
                 </button>
 
-                <button class="btn btn-sm btn-outline-info w-100 mb-2" onclick="downloadAllFiles()">
-                    <i class="bi bi-cloud-download me-1"></i>Download All
-                </button>
+                <details class="pwa-panel mb-2">
+                    <summary><i class="bi bi-phone me-1"></i>App &amp; Updates</summary>
+                    <p class="pwa-hint" id="pwaVersion">FileRoom</p>
+                    <p class="pwa-hint" id="pwaUpdateStatus" role="status" aria-live="polite">Updates are checked automatically.</p>
+                    <button type="button" class="btn btn-sm btn-outline-secondary w-100 mb-2" id="pwaCheckBtn">Check for updates</button>
+                    <button type="button" class="btn btn-sm btn-primary w-100 mb-2 d-none" id="pwaRestartBtn">Restart &amp; update</button>
+                    <button type="button" class="btn btn-sm btn-success w-100 mb-2" id="pwaInstallBtn"><i class="bi bi-download me-1"></i>Install app</button>
+                    <p class="pwa-hint" id="pwaInstallHelp"></p>
+                </details>
 
                 <a href="https://github.com/chuckmoritzgg/fileroom" target="_blank" rel="noopener"
                     class="btn btn-sm btn-outline-secondary w-100 mb-3">
                     <i class="bi bi-github me-1"></i>View on GitHub
                 </a>
 
-                <div class="text-center">
-                    <small class="text-muted">Room: <strong>{{ room_code }}</strong></small>
+                <div class="text-center room-label">
+                    <small class="text-muted">Room: <strong id="sidebarRoomCode"></strong></small>
                 </div>
             </div>
-        </div>
+        </aside>
 
         <!-- Main Chat -->
-        <div class="main-chat">
+        <main class="main-chat" id="mainChat">
             <div class="chat-header">
-                <button class="btn-menu" onclick="toggleSidebar()">
+                <button class="btn-menu" data-action="toggle-sidebar" title="Menu">
                     <i class="bi bi-list"></i>
                 </button>
 
                 <div class="header-info">
-                    <h5 class="mb-0">Chat 2 Go: {{ room_code }}</h5>
+                    <h5 class="mb-0" id="roomTitle">FileRoom</h5>
+                    <small class="connection-state" id="connectionState"></small>
                 </div>
 
-                <button class="btn-qr" onclick="openQR()">
-                    <i class="bi bi-qr-code"></i>
-                </button>
-                <button class="btn-room-change" onclick="openRoomChangeModal()" title="Change Room">
-                    <i class="bi bi-door-open"></i>
-                </button>
+                <div class="header-actions">
+                    <button class="btn-header" data-action="toggle-select" title="Select messages" id="selectModeBtn">
+                        <i class="bi bi-check2-square"></i>
+                    </button>
+                    <button class="btn-header" data-action="open-qr" title="Share room / QR code">
+                        <i class="bi bi-qr-code"></i>
+                    </button>
+                    <button class="btn-header" data-action="open-room-change" title="Change room">
+                        <i class="bi bi-door-open"></i>
+                    </button>
+                </div>
             </div>
 
-            <div class="messages-container" id="messagesContainer">
-                {% for msg in messages %}
-                {% if msg.type == 'text' %}
-                <div class="message text" id="msg-{{ msg.id }}">
-                    <div class="message-header">
-                        {{ msg.username }}
-                        <span class="message-time">
-                            {{ msg.time }}
-                            <div class="circular-timer" data-seconds="{{ msg.time_remaining }}">
-                                <svg class="timer-circle">
-                                    <circle class="timer-track"></circle>
-                                    <circle class="timer-progress"></circle>
-                                </svg>
-                                <span class="timer-text">{{ msg.time_remaining }}s</span>
-                            </div>
-                        </span>
-                    </div>
-                    <div class="message-content">{{ msg.text }}</div>
-                    {% if msg.links %}
-                    <div class="link-previews">
-                        {% for link in msg.links %}
-                        <div class="link-preview">
-                            <i class="bi bi-link-45deg"></i>
-                            <a href="{{ link }}" target="_blank" rel="noopener">{{ link }}</a>
-                        </div>
-                        {% endfor %}
-                    </div>
-                    {% endif %}
-                    <div class="message-footer">
-                        <button class="btn-delete" onclick="deleteMessage('{{ msg.id }}')">
-                            <i class="bi bi-trash"></i>
-                        </button>
-                    </div>
+            <div class="messages-container" id="messagesContainer" aria-live="polite">
+                <div class="empty-state" id="emptyState">
+                    <i class="bi bi-chat-square-dots"></i>
+                    <p>No messages yet. Send text, files, photos, voice notes or your location.<br>
+                        Everything disappears automatically.</p>
                 </div>
-                {% elif msg.type == 'location' %}
-                <div class="message location" id="msg-{{ msg.id }}">
-                    <div class="message-header">
-                        {{ msg.username }}
-                        <span class="message-time">
-                            {{ msg.time }}
-                            <div class="circular-timer" data-seconds="{{ msg.time_remaining }}">
-                                <svg class="timer-circle">
-                                    <circle class="timer-track"></circle>
-                                    <circle class="timer-progress"></circle>
-                                </svg>
-                                <span class="timer-text">{{ msg.time_remaining }}s</span>
-                            </div>
-                        </span>
-                    </div>
-                    <div class="location-preview" id="map-{{ msg.id }}" data-lat="{{ msg.latitude }}"
-                        data-lng="{{ msg.longitude }}"></div>
-                    <div class="location-link">
-                        <a href="https://www.openstreetmap.org/?mlat={{ msg.latitude }}&mlon={{ msg.longitude }}#map=15/{{ msg.latitude }}/{{ msg.longitude }}"
-                            target="_blank">
-                            <i class="bi bi-geo-alt-fill me-1"></i>Open in Map
-                        </a>
-                    </div>
-                    <div class="message-footer">
-                        <button class="btn-delete" onclick="deleteMessage('{{ msg.id }}')">
-                            <i class="bi bi-trash"></i>
-                        </button>
-                    </div>
+            </div>
+
+            <!-- Upload progress -->
+            <div class="upload-status d-none" id="uploadStatus">
+                <div class="upload-status-text" id="uploadStatusText">Uploading…</div>
+                <div class="upload-bar"><div class="upload-bar-fill" id="uploadBarFill"></div></div>
+                <button class="btn-upload-cancel" data-action="cancel-upload" title="Cancel upload"><i class="bi bi-x-lg"></i></button>
+            </div>
+
+            <!-- Selection toolbar (multi-select) -->
+            <div class="selection-bar d-none" id="selectionBar">
+                <span id="selectionCount">0 selected</span>
+                <div class="selection-actions">
+                    <button data-action="select-all" title="Select all"><i class="bi bi-check-all"></i><span>All</span></button>
+                    <button data-action="share-selected" title="Share"><i class="bi bi-share"></i><span>Share</span></button>
+                    <button data-action="copy-selected" title="Copy text"><i class="bi bi-clipboard"></i><span>Copy</span></button>
+                    <button data-action="download-selected" title="Download"><i class="bi bi-download"></i><span>Save</span></button>
+                    <button data-action="delete-selected" title="Delete"><i class="bi bi-trash"></i><span>Delete</span></button>
+                    <button data-action="toggle-select" title="Done"><i class="bi bi-x-lg"></i><span>Done</span></button>
                 </div>
-                {% elif msg.type == 'image' %}
-                <div class="message image" id="msg-{{ msg.id }}">
-                    <div class="message-header">
-                        {{ msg.username }}
-                        <span class="message-time">
-                            {{ msg.time }}
-                            <div class="circular-timer" data-seconds="{{ msg.time_remaining }}">
-                                <svg class="timer-circle">
-                                    <circle class="timer-track"></circle>
-                                    <circle class="timer-progress"></circle>
-                                </svg>
-                                <span class="timer-text">{{ msg.time_remaining }}s</span>
-                            </div>
-                        </span>
-                    </div>
-                    <div class="image-preview"
-                        onclick="openImageModal('/api/download/{{ msg.id }}', '{{ msg.filename }}')">
-                        <img src="/api/download/{{ msg.id }}" alt="{{ msg.filename }}" loading="lazy">
-                        <div class="image-overlay">
-                            <i class="bi bi-arrows-fullscreen"></i>
-                            <span>Click to view</span>
-                        </div>
-                    </div>
-                    <div class="message-footer">
-                        <button class="btn-delete" onclick="deleteMessage('{{ msg.id }}')">
-                            <i class="bi bi-trash"></i>
-                        </button>
-                    </div>
-                </div>
-                {% elif msg.type == 'voice' %}
-                <div class="message voice" id="msg-{{ msg.id }}">
-                    <div class="message-header">
-                        {{ msg.username }}
-                        <span class="message-time">
-                            {{ msg.time }}
-                            <div class="circular-timer" data-seconds="{{ msg.time_remaining }}">
-                                <svg class="timer-circle">
-                                    <circle class="timer-track"></circle>
-                                    <circle class="timer-progress"></circle>
-                                </svg>
-                                <span class="timer-text">{{ msg.time_remaining }}s</span>
-                            </div>
-                        </span>
-                    </div>
-                    <div class="voice-player" data-src="/api/download/{{ msg.id }}">
-                        <button class="voice-play-btn">
-                            <i class="bi bi-play-fill"></i>
-                        </button>
-                        <div class="voice-progress">
-                            <div class="voice-waveform">
-                                <div class="wave-bar"></div>
-                                <div class="wave-bar"></div>
-                                <div class="wave-bar"></div>
-                                <div class="wave-bar"></div>
-                                <div class="wave-bar"></div>
-                            </div>
-                            <div class="voice-time">0:00</div>
-                        </div>
-                        <button class="voice-download-btn"
-                            onclick="downloadFile('/api/download/{{ msg.id }}', '{{ msg.filename }}')">
-                            <i class="bi bi-download"></i>
-                        </button>
-                    </div>
-                    <div class="message-footer">
-                        <button class="btn-delete" onclick="deleteMessage('{{ msg.id }}')">
-                            <i class="bi bi-trash"></i>
-                        </button>
-                    </div>
-                </div>
-                {% else %}
-                <div class="message file" id="msg-{{ msg.id }}">
-                    <div class="message-header">
-                        {{ msg.username }}
-                        <span class="message-time">
-                            {{ msg.time }}
-                            <div class="circular-timer" data-seconds="{{ msg.time_remaining }}">
-                                <svg class="timer-circle">
-                                    <circle class="timer-track"></circle>
-                                    <circle class="timer-progress"></circle>
-                                </svg>
-                                <span class="timer-text">{{ msg.time_remaining }}s</span>
-                            </div>
-                        </span>
-                    </div>
-                    <div class="file-info">
-                        <i class="bi bi-file-earmark file-icon"></i>
-                        <div class="flex-grow-1">
-                            <div class="fw-semibold"
-                                onclick="downloadFile('/api/download/{{ msg.id }}', '{{ msg.filename }}')">
-                                {{ msg.filename }}
-                            </div>
-                            <small>{{ msg.size_mb }} MB</small>
-                        </div>
-                        <a href="/api/download/{{ msg.id }}" class="btn-download">
-                            <i class="bi bi-download"></i>
-                        </a>
-                    </div>
-                    <div class="message-footer">
-                        <button class="btn-delete" onclick="deleteMessage('{{ msg.id }}')">
-                            <i class="bi bi-trash"></i>
-                        </button>
-                    </div>
-                </div>
-                {% endif %}
-                {% endfor %}
             </div>
 
             <!-- Input Area -->
-            <div class="input-area">
-                <!-- Hidden file inputs -->
-                <input type="file" id="fileInput" multiple style="display:none;" accept="*/*">
-                <input type="file" id="photoInput" multiple accept="image/*,video/*" capture="environment"
-                    style="display:none;">
+            <div class="input-area" id="inputArea">
+                <input type="file" id="fileInput" multiple hidden>
+                <input type="file" id="photoInput" multiple accept="image/*,video/*" hidden>
+                <input type="file" id="cameraInput" accept="image/*" capture="environment" hidden>
 
-
-                <!-- Attach Menu -->
                 <div class="attach-menu" id="attachMenu">
-                    <button onclick="selectAttachment('file')">
+                    <button data-action="pick-files">
                         <i class="bi bi-file-earmark"></i>
-                        <span>File</span>
+                        <span>Files</span>
                     </button>
-                    <button onclick="selectAttachment('photo')">
+                    <button data-action="pick-photos">
+                        <i class="bi bi-images"></i>
+                        <span>Photos &amp; Videos</span>
+                    </button>
+                    <button data-action="pick-camera">
                         <i class="bi bi-camera"></i>
-                        <span>Photo</span>
+                        <span>Camera</span>
                     </button>
-                    <button onclick="sendLocation()">
+                    <button data-action="send-location">
                         <i class="bi bi-geo-alt"></i>
                         <span>Location</span>
                     </button>
                 </div>
 
                 <div class="input-wrapper">
-                    <button class="btn-attach" onclick="toggleAttachMenu()" title="Attach">
+                    <button class="btn-attach" data-action="toggle-attach" title="Attach">
                         <i class="bi bi-plus-lg"></i>
                     </button>
 
-                    <input type="text" class="message-input" id="messageInput" placeholder="Type a message..."
-                        onkeypress="if(event.key==='Enter') sendMessage()">
+                    <textarea class="message-input" id="messageInput" rows="1" placeholder="Type a message..."
+                        enterkeyhint="send"></textarea>
 
-                    <button class="btn-voice" id="voiceBtn" onpointerdown="startRecording(event)"
-                        onpointerup="stopRecording(event)" onpointercancel="stopRecording(event)"
-                        title="Hold to record">
+                    <button class="btn-voice" id="voiceBtn" title="Hold to record a voice message">
                         <i class="bi bi-mic-fill"></i>
                     </button>
 
-                    <button class="btn-send" onclick="sendMessage()" title="Send">
+                    <button class="btn-send" data-action="send" title="Send">
                         <i class="bi bi-send-fill"></i>
                     </button>
                 </div>
             </div>
-        </div>
+        </main>
     </div>
 
     <!-- Recording Indicator -->
@@ -391,10 +259,21 @@
         Recording... <span id="recordingTime">0:00</span>
     </div>
 
+    <!-- Update banner (shown when a verified new version is ready) -->
+    <div id="pwaBanner" class="pwa-banner d-none" role="status" aria-live="polite">
+        <span class="pwa-banner-text">New version ready.</span>
+        <div class="pwa-banner-actions">
+            <button type="button" id="pwaBannerRestart" class="btn btn-sm btn-primary">Restart</button>
+            <button type="button" id="pwaBannerLater" class="btn btn-sm btn-outline-light">Later</button>
+        </div>
+    </div>
+
     <div class="toast-container position-fixed top-0 end-0 p-3"></div>
 
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
-    <script src="/static/js/app.js"></script>
+    <script src="/static/vendor/bootstrap/bootstrap.bundle.min.js?v={{ build }}"></script>
+    <script src="/static/vendor/leaflet/leaflet.js?v={{ build }}"></script>
+    <script src="/static/js/pwa.js?v={{ build }}"></script>
+    <script src="/static/js/app.js?v={{ build }}"></script>
 </body>
 
 </html>

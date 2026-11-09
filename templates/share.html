@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark" class="page-scroll">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="app-version" content="{{ version }}">
+    <meta name="app-build" content="{{ build }}">
+    <meta name="max-room-code-length" content="{{ max_room_code_length }}">
+    <meta name="theme-color" content="#1e293b">
+    <link rel="manifest" href="/manifest.webmanifest">
+    <link rel="apple-touch-icon" href="/static/icons/icon-192x192.png">
+    <link rel="icon" type="image/x-icon" href="/static/images/favicon.ico">
+    <title>Share to FileRoom</title>
+    <link rel="stylesheet" href="/static/vendor/bootstrap/bootstrap.min.css?v={{ build }}">
+    <link rel="stylesheet" href="/static/vendor/bootstrap-icons/bootstrap-icons.min.css?v={{ build }}">
+    <link rel="stylesheet" href="/static/css/styles.css?v={{ build }}">
+</head>
+
+<body class="share-page">
+    <main class="share-container">
+        <h4><i class="bi bi-share me-2"></i>Share to FileRoom</h4>
+
+        <div class="share-info" id="shareInfo">
+            <i class="bi bi-hourglass-split"></i> Loading shared content...
+        </div>
+
+        <div id="shareChoices">
+            <div class="recent-rooms" id="recentRoomsContainer" hidden>
+                <h6><i class="bi bi-clock-history"></i> Send to a recent room</h6>
+                <div id="recentRoomsList"></div>
+            </div>
+
+            <form id="joinForm" class="mt-3">
+                <label for="roomCodeInput" class="form-label small text-muted">Room name or code</label>
+                <input id="roomCodeInput" class="room-code-input" type="text" maxlength="{{ max_room_code_length }}"
+                    placeholder="e.g. ABC123 or FAMILY" autocomplete="off" autocapitalize="characters" spellcheck="false">
+                <button type="submit" class="btn-action btn-secondary-action" id="joinRoomBtn">
+                    <i class="bi bi-door-open me-2"></i>Send to this Room
+                </button>
+            </form>
+
+            <div class="divider">or</div>
+
+            <button type="button" class="btn-action btn-primary-action" id="newRoomBtn">
+                <i class="bi bi-plus-circle me-2"></i>Create New Room
+            </button>
+            <button type="button" class="btn-action btn-link-action" id="cancelBtn">Cancel</button>
+        </div>
+
+        <div id="status" role="status" aria-live="polite"></div>
+        <div class="upload-progress" id="uploadProgress">
+            <div id="progressList"></div>
+        </div>
+    </main>
+
+    <div class="debug-panel" id="debugPanel" hidden>
+        <div class="debug-header">Debug log</div>
+        <div class="debug-console" id="debugConsole"></div>
+    </div>
+
+    <script src="/static/js/pwa.js?v={{ build }}"></script>
+    <script src="/static/js/share.js?v={{ build }}"></script>
+</body>
+
+</html>
