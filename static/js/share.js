@@ -4,6 +4,9 @@
     const $ = (id) => document.getElementById(id);
     const params = new URLSearchParams(location.search);
     const sessionId = params.get('share') || '';
+    // "local": the service worker kept the shared content on this device (IndexedDB). It is handed to
+    // the room page, which encrypts it with the room key. Anything else is a server-side share session.
+    const LOCAL = sessionId === 'local';
     const DEBUG = params.has('debug');
     const MAX_CODE_LENGTH = parseInt(document.querySelector('meta[name="max-room-code-length"]')?.content || '64', 10);
     const RECENT_KEY = 'fileroom_recent_rooms';
@@ -86,7 +89,14 @@
             return;
         }
         try {
-            shareData = await api(`/api/share/${encodeURIComponent(sessionId)}`);
+            if (LOCAL) {
+                const share = await window.FileRoomShareStore.get();
+                if (!share) throw Object.assign(new Error('nothing pending'), { status: 404 });
+                const kind = (f) => (f.type.startsWith('image/') ? 'image' : f.type.startsWith('video/') ? 'video' : f.type.startsWith('audio/') ? 'voice' : 'file');
+                shareData = { files: share.files.map((f) => ({ name: f.name, size: f.size, type: kind(f) })), combined_text: share.combinedText };
+            } else {
+                shareData = await api(`/api/share/${encodeURIComponent(sessionId)}`);
+            }
             log('share data', shareData);
             const parts = [];
             const files = shareData.files || [];
@@ -135,6 +145,12 @@
         setBusy(true);
         $('progressList').textContent = '';
         showStatus(`Sending to ${code}…`);
+        if (LOCAL) {
+            // The room page takes it from here: it knows the room key and encrypts before uploading.
+            const isNew = !storage.get(RECENT_KEY, []).includes(code) && !storage.get(`fileroom_user_${code}`, null);
+            location.replace(`${roomUrl(code)}?share=local${isNew ? '&new=1' : ''}`);
+            return;
+        }
         try {
             const key = `fileroom_user_${code}`;
             const stored = storage.get(key, null);
@@ -169,6 +185,63 @@
         }
     }
 
+    // ----- Send to people: known devices (contacts.js) that can be invited by push -------------
+    // The content goes into a new room; everybody ticked is invited to it once the room page is open.
+    const ticked = new Set();
+    let people = [];
+    function loadPeople() {
+        return new Promise((resolve) => {
+            let request;
+            try { request = indexedDB.open('fileroom-identity', 1); } catch { resolve([]); return; }
+            request.onupgradeneeded = () => { // same layout as contacts.js creates
+                request.result.createObjectStore('self');
+                request.result.createObjectStore('contacts', { keyPath: 'id' });
+            };
+            request.onerror = () => resolve([]);
+            request.onsuccess = () => {
+                const db = request.result;
+                try {
+                    const all = db.transaction('contacts', 'readonly').objectStore('contacts').getAll();
+                    all.onsuccess = () => { db.close(); resolve(all.result || []); };
+                    all.onerror = () => { db.close(); resolve([]); };
+                } catch { db.close(); resolve([]); }
+            };
+        });
+    }
+    function renderPeople() {
+        const groups = (storage.get('fileroom_groups', []) || []).map((g) => ({ ...g, members: (g.members || []).filter((id) => people.some((p) => p.id === id)) })).filter((g) => g.members.length);
+        $('sharePeopleGroups').innerHTML = groups.map((g) => `<span class="people-group${g.members.every((id) => ticked.has(id)) ? ' on' : ''}">
+            <button type="button" data-group="${esc(g.id)}"><i class="bi bi-people-fill"></i> ${esc(g.name)} (${g.members.length})</button></span>`).join('');
+        $('sharePeopleList').innerHTML = people.map((p) => `<li><label><input type="checkbox" data-contact="${esc(p.id)}"${ticked.has(p.id) ? ' checked' : ''}>
+            <span>${p.fav ? '<i class="bi bi-star-fill"></i> ' : ''}${esc(p.alias || p.name || 'Unnamed device')}</span></label></li>`).join('');
+        $('sharePeopleBtn').disabled = !ticked.size;
+        $('sharePeople').hidden = !people.length;
+    }
+    loadPeople().then((list) => {
+        people = list.filter((p) => p.push || Object.keys(p.pushes || {}).length).sort((a, b) => (Number(Boolean(b.fav)) - Number(Boolean(a.fav))) || ((b.last || 0) - (a.last || 0))).slice(0, 30);
+        renderPeople();
+    });
+    $('sharePeopleList').addEventListener('change', (e) => {
+        const id = e.target.dataset?.contact;
+        if (!id) return;
+        if (e.target.checked) ticked.add(id); else ticked.delete(id);
+        renderPeople();
+    });
+    $('sharePeopleGroups').addEventListener('click', (e) => {
+        const id = e.target.closest('[data-group]')?.dataset.group;
+        const group = (storage.get('fileroom_groups', []) || []).find((g) => g.id === id);
+        if (!group) return;
+        const members = group.members.filter((m) => people.some((p) => p.id === m));
+        const all = members.every((m) => ticked.has(m));
+        for (const m of members) { if (all) ticked.delete(m); else ticked.add(m); }
+        renderPeople();
+    });
+    $('sharePeopleBtn').addEventListener('click', () => {
+        if (!ticked.size) return;
+        storage.set('fileroom_invite_after', { ids: [...ticked], at: Date.now() });
+        sendToRoom(randomRoomCode());
+    });
+
     $('joinForm').addEventListener('submit', (e) => { e.preventDefault(); sendToRoom($('roomCodeInput').value); });
     $('newRoomBtn').addEventListener('click', () => sendToRoom(randomRoomCode()));
     $('recentRoomsList').addEventListener('click', (e) => {
@@ -176,7 +249,8 @@
         if (btn) sendToRoom(btn.dataset.room);
     });
     $('cancelBtn').addEventListener('click', async () => {
-        if (sessionId && shareData) {
+        if (LOCAL) await window.FileRoomShareStore.clear();
+        else if (sessionId && shareData) {
             try { await fetch(`/api/share/${encodeURIComponent(sessionId)}`, { method: 'DELETE' }); } catch { /* ignore */ }
         }
         const recent = storage.get(RECENT_KEY, []);

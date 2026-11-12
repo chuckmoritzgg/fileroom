@@ -16,7 +16,7 @@
     <meta name="apple-mobile-web-app-title" content="FileRoom">
     <meta name="application-name" content="FileRoom">
     <meta name="theme-color" content="#1e293b">
-    <meta name="description" content="Share files, messages, voice notes and locations in temporary rooms that auto-delete">
+    <meta name="description" content="Share files, messages, voice notes and locations in temporary rooms that auto-delete. Encrypted voice calls and babyphone.">
     <link rel="manifest" href="/manifest.webmanifest">
     <link rel="apple-touch-icon" href="/static/icons/icon-192x192.png">
     <link rel="icon" type="image/x-icon" href="/static/images/favicon.ico">
@@ -66,6 +66,10 @@
             <div class="qr-modal-body">
                 <img id="qrImage" class="qr-image" alt="QR code for this room">
                 <div class="room-code-display" id="qrRoomCode"></div>
+                <p class="qr-hint" id="qrHint"></p>
+                <button type="button" class="btn btn-outline-primary btn-sm mb-3" data-action="open-people">
+                    <i class="bi bi-person-plus-fill me-1"></i>Invite known devices
+                </button>
                 <div class="share-url">
                     <input type="text" id="shareUrl" readonly>
                     <button data-action="copy-url" class="btn-copy" title="Copy link">
@@ -105,6 +109,156 @@
         </form>
     </div>
 
+    <!-- Room key (end-to-end encryption) -->
+    <div class="qr-modal sheet" id="keyModal" role="dialog" aria-modal="true" aria-labelledby="keyModalTitle">
+        <div class="qr-modal-content">
+            <div class="qr-modal-header">
+                <h5 id="keyModalTitle"><i class="bi bi-shield-lock me-2"></i>Room key</h5>
+                <button type="button" class="btn-close-modal" data-action="close-key" title="Close"><i class="bi bi-x-lg"></i></button>
+            </div>
+            <div class="sheet-body">
+                <div class="voice-security" id="keyStatus"></div>
+                <div class="contact-hint d-none" id="contactHint">
+                    <span></span>
+                    <button type="button" class="btn btn-primary btn-sm w-100 mt-2" data-action="contacts-encrypt">
+                        <i class="bi bi-person-check-fill me-1"></i>Encrypt for known devices
+                    </button>
+                </div>
+                <button type="button" class="btn btn-outline-primary w-100 mb-3" data-action="copy-invite" data-needs-key>
+                    <i class="bi bi-link-45deg me-1"></i>Copy invite link with key
+                </button>
+                <form id="keyForm">
+                    <label for="keyInput">Room password (everyone types the same one)</label>
+                    <input type="password" id="keyInput" class="sheet-input" placeholder="At least 6 characters" autocomplete="off"
+                        autocapitalize="off" spellcheck="false" maxlength="200">
+                    <button type="submit" class="btn btn-primary w-100 mt-2"><i class="bi bi-key-fill me-1"></i>Use this password</button>
+                    <button type="button" class="btn btn-outline-secondary w-100 mt-2" data-action="key-random">
+                        <i class="bi bi-qr-code me-1"></i>Create a random key &amp; show QR code
+                    </button>
+                </form>
+                <button type="button" class="btn btn-outline-danger w-100 mt-2" data-action="key-remove" data-needs-key>
+                    <i class="bi bi-unlock me-1"></i>Remove key from this device
+                </button>
+                <p class="sheet-note">The key never leaves your devices: it is kept in the part of the link after “#”, which browsers do
+                    not send to the server. New random rooms get a key automatically.</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- This device: persistent name and known devices -->
+    <div class="qr-modal sheet" id="profileModal" role="dialog" aria-modal="true" aria-labelledby="profileModalTitle">
+        <div class="qr-modal-content">
+            <div class="qr-modal-header">
+                <h5 id="profileModalTitle"><i class="bi bi-person-badge me-2"></i>This device</h5>
+                <button type="button" class="btn-close-modal" data-action="close-profile" title="Close"><i class="bi bi-x-lg"></i></button>
+            </div>
+            <div class="sheet-body">
+                <form id="profileForm">
+                    <label for="profileName">Your name – kept on this device for every room</label>
+                    <input type="text" id="profileName" class="sheet-input" maxlength="20" autocomplete="nickname"
+                        placeholder="Empty: a random name in every room">
+                    <label class="sheet-check"><input type="checkbox" id="profilePublic"> Show this name to everyone in a room</label>
+                    <p class="sheet-note mt-1">Off: only known devices see your name (it is sent to them encrypted). Everyone else, and
+                        the server, see a random name per room.</p>
+                    <button type="submit" class="btn btn-primary w-100 mt-2"><i class="bi bi-check-lg me-1"></i>Save</button>
+                </form>
+                <div class="sheet-section">Your other devices</div>
+                <button type="button" class="btn btn-outline-primary w-100" data-action="link-start">
+                    <i class="bi bi-phone-fill me-1"></i>Link another device
+                </button>
+                <div class="link-box d-none" id="linkBox">
+                    <img id="linkQr" alt="QR code for linking a device">
+                    <p class="sheet-note mt-2">Scan this with your other phone, tablet or computer (or open the link there) and confirm on both.
+                        It gets this device's identity, known devices, favourites, groups and name. Valid for 5 minutes, for one device.
+                        Show it to nobody else.</p>
+                    <div class="share-url">
+                        <input type="text" id="linkUrl" readonly>
+                        <button type="button" data-action="link-copy" class="btn-copy" title="Copy link"><i class="bi bi-clipboard"></i></button>
+                    </div>
+                </div>
+                <div class="sheet-section">Known devices</div>
+                <p class="mb-2" id="profileKnown">No known devices yet</p>
+                <ul class="contact-list" id="profileContacts"></ul>
+                <p class="sheet-note">Devices you have shared an encrypted room with. When you meet one again – in any room, under any
+                    name – it is recognised without the server learning who is who, and gets the room key automatically. A room
+                    where everyone is a known device encrypts itself.</p>
+                <button type="button" class="btn btn-outline-danger w-100 mt-3" data-action="contacts-forget">
+                    <i class="bi bi-person-x me-1"></i>Forget known devices &amp; reset identity
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- People: favourites, groups, invitations -->
+    <div class="qr-modal sheet" id="peopleModal" role="dialog" aria-modal="true" aria-labelledby="peopleModalTitle">
+        <div class="qr-modal-content">
+            <div class="qr-modal-header">
+                <h5 id="peopleModalTitle"><i class="bi bi-person-plus-fill me-2"></i>Invite to this room</h5>
+                <button type="button" class="btn-close-modal" data-action="close-people" title="Close"><i class="bi bi-x-lg"></i></button>
+            </div>
+            <div class="sheet-body">
+                <div class="sheet-section mt-0 d-none" id="peopleInvitesTitle">Invitations for you</div>
+                <ul class="contact-list invites" id="peopleInvites"></ul>
+                <div class="contact-hint d-none" id="peoplePush">
+                    <span id="peoplePushText"></span>
+                    <button type="button" class="btn btn-primary btn-sm w-100 mt-2" data-action="people-push" id="peoplePushBtn">
+                        <i class="bi bi-bell-fill me-1"></i>Allow notifications
+                    </button>
+                </div>
+                <div class="people-groups" id="peopleGroups"></div>
+                <ul class="contact-list people" id="peopleList"></ul>
+                <input type="text" id="peopleText" class="sheet-input mt-2" maxlength="120" placeholder="Short note (optional), e.g. “photos from today”">
+                <button type="button" class="btn btn-primary w-100 mt-2" data-action="people-invite" id="peopleInvite" disabled>
+                    <i class="bi bi-send-fill me-1"></i>Invite to this room<span id="peopleInviteCount"></span>
+                </button>
+                <button type="button" class="btn btn-outline-secondary w-100 mt-2" data-action="people-save-group" id="peopleSaveGroup" disabled>
+                    <i class="bi bi-people-fill me-1"></i>Save the ticked as a group
+                </button>
+                <p class="sheet-note">Everybody ticked gets a notification on their phone and joins with one tap – the room key comes
+                    with the invitation, encrypted for that phone only. What you send in this room is what they will see.</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Calls & babyphone -->
+    <div class="qr-modal sheet" id="voiceModal" role="dialog" aria-modal="true" aria-labelledby="voiceModalTitle">
+        <div class="qr-modal-content">
+            <div class="qr-modal-header">
+                <h5 id="voiceModalTitle"><i class="bi bi-telephone me-2"></i>Call &amp; Babyphone</h5>
+                <button type="button" class="btn-close-modal" data-action="close-voice" title="Close"><i class="bi bi-x-lg"></i></button>
+            </div>
+            <div class="sheet-body">
+                <div class="voice-security" id="voiceSecurity"></div>
+                <p class="voice-foreign d-none" id="voiceForeign"></p>
+                <button type="button" class="voice-option" data-action="voice-call">
+                    <i class="bi bi-telephone-fill"></i>
+                    <span><strong id="voiceCallTitle">Start voice call</strong><small id="voiceCallHint">Rings everyone who has this room open</small></span>
+                </button>
+                <div class="sheet-section">Babyphone</div>
+                <button type="button" class="voice-option" data-action="voice-baby">
+                    <i class="bi bi-broadcast"></i>
+                    <span><strong id="voiceBabyTitle">Baby station</strong><small>This phone stays with the baby: it listens, detects sound
+                            and alerts the parent units. Keep it on the charger.</small></span>
+                </button>
+                <button type="button" class="voice-option" data-action="voice-parent">
+                    <i class="bi bi-ear-fill"></i>
+                    <span><strong id="voiceParentTitle">Parent unit</strong><small id="voiceParentHint">Hear the baby, get alerts, talk back.</small></span>
+                </button>
+                <p class="sheet-note">Audio travels directly between the phones. Install the app and allow notifications on the parent
+                    phone so alerts also arrive when the screen is off. A babyphone app does not replace supervision.</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Night screen: black display that keeps the phone awake during a babyphone session -->
+    <div class="night-overlay d-none" id="nightOverlay" data-action="voice-night-off" role="button" aria-label="Leave the dark screen">
+        <div class="night-inner" id="nightInner">
+            <i class="bi bi-moon-stars-fill"></i>
+            <span id="nightText">Listening</span>
+            <small>Tap to wake the screen</small>
+        </div>
+    </div>
+
     <div class="chat-container">
         <div class="sidebar-backdrop" data-action="toggle-sidebar"></div>
         <!-- Sidebar -->
@@ -121,8 +275,11 @@
             </div>
 
             <div class="sidebar-footer">
+                <button class="btn btn-sm btn-primary w-100 mb-2" data-action="open-people">
+                    <i class="bi bi-person-plus-fill me-1"></i>Invite people
+                </button>
                 <button class="btn btn-sm btn-outline-primary w-100 mb-2" data-action="change-name">
-                    <i class="bi bi-pencil me-1"></i>Change Name
+                    <i class="bi bi-person-badge me-1"></i>Name &amp; known devices
                 </button>
                 <button class="btn btn-sm btn-outline-info w-100 mb-2" data-action="share-all">
                     <i class="bi bi-share me-1"></i>Share All Files
@@ -168,6 +325,12 @@
                 </div>
 
                 <div class="header-actions">
+                    <button class="btn-header voice" data-action="open-voice" title="Call &amp; babyphone" id="voiceHeaderBtn">
+                        <i class="bi bi-telephone-fill"></i><span class="voice-badge d-none" id="voiceBadge"></span>
+                    </button>
+                    <button class="btn-header key" data-action="open-key" title="Room key" id="keyBtn">
+                        <i class="bi bi-unlock"></i>
+                    </button>
                     <button class="btn-header" data-action="toggle-select" title="Select messages" id="selectModeBtn">
                         <i class="bi bi-check2-square"></i>
                     </button>
@@ -179,6 +342,25 @@
                     </button>
                 </div>
             </div>
+
+            <!-- Invitation to another room -->
+            <div class="ring-banner invite d-none" id="inviteBanner" role="status">
+                <i class="bi bi-envelope-paper-heart-fill"></i>
+                <span id="inviteText"></span>
+                <button type="button" class="ring-btn join" data-action="invite-join"><i class="bi bi-box-arrow-in-right"></i> Join</button>
+                <button type="button" class="ring-btn" data-action="invite-dismiss" title="Dismiss"><i class="bi bi-x-lg"></i></button>
+            </div>
+
+            <!-- Incoming call -->
+            <div class="ring-banner d-none" id="ringBanner" role="alert">
+                <i class="bi bi-telephone-inbound-fill"></i>
+                <span id="ringText">Incoming call…</span>
+                <button type="button" class="ring-btn join" data-action="ring-join"><i class="bi bi-telephone-fill"></i> Join</button>
+                <button type="button" class="ring-btn" data-action="ring-dismiss" title="Dismiss"><i class="bi bi-x-lg"></i></button>
+            </div>
+
+            <!-- Active call / babyphone session (filled by voice.js) -->
+            <div class="voice-bar d-none" id="voiceBar"></div>
 
             <div class="messages-container" id="messagesContainer" aria-live="polite">
                 <div class="empty-state" id="emptyState">
@@ -273,7 +455,12 @@
     <script src="/static/vendor/bootstrap/bootstrap.bundle.min.js?v={{ build }}"></script>
     <script src="/static/vendor/leaflet/leaflet.js?v={{ build }}"></script>
     <script src="/static/js/pwa.js?v={{ build }}"></script>
+    <script src="/static/js/e2ee.js?v={{ build }}"></script>
+    <script src="/static/js/qr.js?v={{ build }}"></script>
+    <script src="/static/js/share-store.js?v={{ build }}"></script>
     <script src="/static/js/app.js?v={{ build }}"></script>
+    <script src="/static/js/contacts.js?v={{ build }}"></script>
+    <script src="/static/js/voice.js?v={{ build }}"></script>
 </body>
 
 </html>

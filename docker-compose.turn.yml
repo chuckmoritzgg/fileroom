@@ -1,0 +1,48 @@
+# Optional TURN/STUN server (coturn) for calls and the babyphone between phones that are NOT in the
+# same network (parent on mobile data, baby station on the home Wi-Fi, carrier-grade NAT, ...).
+#
+#   docker compose -f docker-compose.yml -f docker-compose.turn.yml up -d
+#
+# .env (shared with the fileroom service, see docker-compose.yml):
+#   TURN_SECRET=<long random string>
+#   TURN_URLS=turn:your.domain:3478,turn:your.domain:3478?transport=tcp
+#   STUN_URLS=stun:your.domain:3478
+#   TURN_EXTERNAL_IP=<public IP>        only if this host is behind NAT (see below)
+#
+# Firewall: 3478/udp + 3478/tcp and 49160-49200/udp.
+#
+# What it costs: coturn idles at roughly 10-20 MB RAM. It only relays packets when two phones cannot
+# reach each other directly, and those packets are DTLS-SRTP it cannot decrypt. One relayed babyphone
+# stream is ~3 kB/s while the baby is making noise and close to nothing while it is quiet (Opus DTX).
+services:
+  coturn:
+    image: coturn/coturn:4.6-alpine
+    network_mode: host               # relays need a UDP port range; host networking avoids 40 docker-proxies
+    restart: unless-stopped
+    mem_limit: 96m
+    command:
+      - -n                           # no config file, everything is on the command line
+      - --log-file=stdout
+      - --listening-port=3478
+      - --min-port=49160             # 41 relay ports = 41 simultaneous relayed connections
+      - --max-port=49200
+      - --fingerprint
+      - --use-auth-secret            # short-lived credentials issued by FileRoom (/api/ice)
+      - --static-auth-secret=${TURN_SECRET:?Set TURN_SECRET in .env (e.g. openssl rand -hex 32)}
+      - --realm=${TURN_REALM:-fileroom}
+      - --max-bps=16000              # bytes/s per connection: plenty for voice, useless for abuse
+      - --user-quota=8
+      - --total-quota=40
+      - --stale-nonce=600
+      - --no-cli
+      - --no-tls
+      - --no-dtls
+      - --no-multicast-peers
+      # Behind NAT (home server with a forwarded port): uncomment and set TURN_EXTERNAL_IP.
+      # - --external-ip=${TURN_EXTERNAL_IP}
+      # On a public server (no phones in the same private network as this host) also forbid relaying
+      # into private address ranges:
+      # - --denied-peer-ip=10.0.0.0-10.255.255.255
+      # - --denied-peer-ip=172.16.0.0-172.31.255.255
+      # - --denied-peer-ip=192.168.0.0-192.168.255.255
+      # - --denied-peer-ip=169.254.0.0-169.254.255.255

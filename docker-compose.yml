@@ -11,10 +11,16 @@ services:
       - MESSAGE_EXPIRY_HOURS=1
       - USER_TIMEOUT_SECONDS=60
       - MAX_ROOM_CODE_LENGTH=64
+      # Calls & babyphone. Phones in the same Wi-Fi need none of this. For phones in different
+      # networks set these in .env and add docker-compose.turn.yml (a small coturn container).
+      - STUN_URLS=${STUN_URLS:-}
+      - TURN_URLS=${TURN_URLS:-}
+      - TURN_SECRET=${TURN_SECRET:-}
+      - PUSH_RELAY=1                 # forward (already encrypted) babyphone alerts to push services
+      - MAX_STORAGE_SIZE=2147483648  # all rooms together, on disk (bytes)
     volumes:
-      - type: tmpfs
-        target: /app/uploads
-        tmpfs:
-          size: 2G
-          mode: 0777
+      - fileroom_uploads:/app/uploads   # on disk, encrypted; emptied by the app on every start
     restart: unless-stopped
+
+volumes:
+  fileroom_uploads:

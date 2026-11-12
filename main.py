@@ -1,13 +1,29 @@
 """
-FileRoom - ephemeral rooms for sharing files, messages, voice notes and locations.
+FileRoom - ephemeral rooms for sharing files, messages, voice notes and locations,
+with peer-to-peer voice calls and a babyphone (baby monitor).
 
-All state lives in memory (and uploaded files in UPLOAD_DIR, a tmpfs in Docker).
-Everything expires automatically.
+Rooms, users and message metadata live in memory (a few hundred bytes each). File contents never
+do: uploads are streamed to UPLOAD_DIR on disk, downloads and ZIP archives are streamed back.
+Everything expires automatically and UPLOAD_DIR is emptied on every start.
+
+What reaches the disk is never readable on its own:
+  * rooms with a key: the browser encrypted the file (end-to-end), the server stores that ciphertext;
+  * everything else: the server encrypts while writing, with a random key per file that exists only
+    in memory. Deleting a message, expiry or a restart destroys the key - the bytes left on the disk
+    are noise. (This protects the disk, not against the running server: only a room key does that.)
+
+Calls and the babyphone cost the server next to nothing: audio goes directly from phone to phone
+(WebRTC). The server only relays small, opaque signaling strings between the devices of a room,
+hands out ICE servers and forwards already-encrypted Web Push requests. It keeps no call state.
+With a room key (end-to-end encryption) messages, files and signaling are ciphertext to the server.
 """
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import hashlib
+import hmac
 import json
 import logging
 import mimetypes
@@ -21,16 +37,17 @@ import time
 import unicodedata
 import zipfile
 from contextlib import asynccontextmanager, suppress
-from email import message_from_bytes
-from email.policy import default as email_default_policy
 from io import BytesIO
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
+import urllib.error
+import urllib.request
 
 import qrcode
 from fastapi import FastAPI, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from starlette.background import BackgroundTask
@@ -48,6 +65,7 @@ TEMPLATE_DIR = BASE_DIR / "templates"
 UPLOAD_DIR = Path(os.environ.get("UPLOAD_DIR", BASE_DIR / "uploads"))
 MAX_FILE_SIZE = int(os.environ.get("MAX_FILE_SIZE", 100 * 1024 * 1024))
 MAX_SHARE_SIZE = int(os.environ.get("MAX_SHARE_SIZE", 500 * 1024 * 1024))
+MAX_STORAGE_SIZE = int(os.environ.get("MAX_STORAGE_SIZE", 2 * 1024 ** 3))   # all rooms together, on disk
 MESSAGE_EXPIRY_SECONDS = int(float(os.environ.get("MESSAGE_EXPIRY_HOURS", 1)) * 3600)
 USER_TIMEOUT_SECONDS = int(os.environ.get("USER_TIMEOUT_SECONDS", 60))
 SHARE_SESSION_SECONDS = int(float(os.environ.get("SHARE_SESSION_MINUTES", 15)) * 60)
@@ -61,6 +79,41 @@ APP_VERSION = (BASE_DIR / "VERSION").read_text().strip() if (BASE_DIR / "VERSION
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 FILE_TYPES = {"file", "image", "video", "voice"}
+
+
+def env_list(name: str) -> List[str]:
+    return [item.strip() for item in os.environ.get(name, '').split(',') if item.strip()]
+
+
+# ----- Calls & babyphone ----------------------------------------------------
+# Phones in the same Wi-Fi find each other without any ICE server. STUN lets most home routers be
+# traversed; TURN (see docker-compose.turn.yml) relays when nothing else works (mobile data, CGNAT).
+STUN_URLS = env_list('STUN_URLS')
+TURN_URLS = env_list('TURN_URLS')
+TURN_SECRET = os.environ.get('TURN_SECRET', '')
+TURN_TTL_SECONDS = int(os.environ.get('TURN_TTL_SECONDS', 24 * 3600))   # a babyphone runs all night
+# Signaling: one opaque string per frame (an encrypted SDP is ~4-6 kB). Token bucket per socket.
+MAX_SIGNAL_LENGTH = 16384
+SIGNAL_BURST = 120
+SIGNAL_RATE = 20.0          # frames per second
+# End-to-end encrypted text/location messages ("<key id>.<iv>.<ciphertext>", base64url)
+MAX_SEALED_LENGTH = MAX_TEXT_LENGTH * 6 + 512
+SEALED_RE = re.compile(r'^[A-Za-z0-9_.-]+$')
+# Web Push relay: the baby station encrypts and signs a notification for a parent phone, the server
+# only forwards the bytes (browsers cannot call push services themselves: no CORS).
+PUSH_RELAY = os.environ.get('PUSH_RELAY', '1').lower() not in ('0', 'false', 'no', 'off')
+PUSH_HOSTS = env_list('PUSH_HOSTS') or [
+    'fcm.googleapis.com',                 # Chrome, Edge, Samsung Internet, ... on Android and desktop
+    '.push.services.mozilla.com',         # Firefox
+    '.notify.windows.com',                # Edge (legacy)
+    '.push.apple.com',                    # Safari
+]
+PUSH_MAX_BODY = 4096
+PUSH_BURST = 40             # an invitation to a group is one push per member
+PUSH_RATE = 0.2             # per second and user: one every 5 s after the burst
+VAPID_RE = re.compile(r'^vapid t=[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+, k=[A-Za-z0-9_-]{20,200}$')
+TOPIC_RE = re.compile(r'^[A-Za-z0-9_-]{1,32}$')
+push_buckets: Dict[str, List[float]] = {}         # user id -> [tokens, last refill]
 
 # ---------------------------------------------------------------------------
 # In-memory storage
@@ -204,11 +257,17 @@ def public_message(msg: Dict[str, Any]) -> Dict[str, Any]:
     elif msg['type'] == 'location':
         data['latitude'] = msg['latitude']
         data['longitude'] = msg['longitude']
+    elif msg['type'] == 'sealed':
+        data['data'] = msg['data']  # ciphertext; only devices with the room key can read it
     else:
         data['filename'] = msg['original_name']
         data['size'] = msg['size']
         data['size_mb'] = round(msg['size'] / (1024 * 1024), 2)
         data['mime'] = msg['mime']
+        if msg.get('enc'):
+            # Encrypted on the sender's device: real name, type and size are inside 'meta'.
+            data['enc'] = True
+            data['meta'] = msg['meta']
     return data
 
 
@@ -302,9 +361,30 @@ async def delete_message_internal(message_id: str, broadcast: bool = True) -> bo
     return True
 
 
-async def save_upload(upload: StarletteUploadFile, dest: Path, limit: int) -> int:
-    """Stream an uploaded file to disk. Returns size, raises ValueError if too large."""
+def new_file_key() -> bytes:
+    """Key (32 bytes) + nonce (12 bytes) for one stored file. Lives only in the message, i.e. in memory."""
+    return secrets.token_bytes(44)
+
+
+def file_cipher(key: bytes, offset: int = 0):
+    """ChaCha20 keystream positioned at byte `offset` of the file (so downloads can seek)."""
+    block, skip = divmod(offset, 64)
+    cipher = Cipher(algorithms.ChaCha20(key[:32], block.to_bytes(4, 'little') + key[32:]), mode=None).encryptor()
+    if skip:
+        cipher.update(bytes(skip))
+    return cipher
+
+
+def storage_used() -> int:
+    return (sum(m.get('size', 0) for m in messages_db.values() if m['type'] in FILE_TYPES)
+            + sum(f['size'] for s in share_sessions.values() for f in s['files']))
+
+
+async def save_upload(upload: StarletteUploadFile, dest: Path, limit: int, key: Optional[bytes] = None) -> int:
+    """Stream an uploaded file to disk, encrypting it on the way if `key` is given (uploads that the
+    browser already encrypted are stored as they are). Returns size, raises ValueError if too large."""
     size = 0
+    cipher = file_cipher(key) if key else None
     await upload.seek(0)
     with open(dest, 'wb') as out:
         while True:
@@ -316,8 +396,22 @@ async def save_upload(upload: StarletteUploadFile, dest: Path, limit: int) -> in
                 out.close()
                 remove_file(dest)
                 raise ValueError("too large")
-            out.write(chunk)
+            out.write(cipher.update(chunk) if cipher else chunk)
     return size
+
+
+def read_stored(msg: Dict[str, Any], start: int = 0, length: Optional[int] = None):
+    """Yield the content of a stored file in chunks, decrypting files the server encrypted."""
+    cipher = file_cipher(msg['key'], start) if msg.get('key') else None
+    remaining = msg['size'] - start if length is None else length
+    with open(file_path_for(msg), 'rb') as fh:
+        fh.seek(start)
+        while remaining > 0:
+            chunk = fh.read(min(CHUNK_SIZE, remaining))
+            if not chunk:
+                break
+            remaining -= len(chunk)
+            yield cipher.update(chunk) if cipher else chunk
 
 
 # ---------------------------------------------------------------------------
@@ -348,6 +442,7 @@ async def cleanup_loop() -> None:
             for uid in [uid for uid, u in users_db.items()
                         if t - u['last_seen'] > MESSAGE_EXPIRY_SECONDS and not connections.get(u['room'], {}).get(uid)]:
                 users_db.pop(uid, None)
+                push_buckets.pop(uid, None)
 
             # Forget empty, idle rooms
             for code in [c for c, r in rooms_db.items()
@@ -384,9 +479,16 @@ jinja = Environment(loader=FileSystemLoader(str(TEMPLATE_DIR)), autoescape=selec
 
 PRECACHE_STATIC = [
     'css/styles.css',
+    'js/e2ee.js',
+    'js/qr.js',
     'js/app.js',
+    'js/contacts.js',
+    'js/voice.js',
+    'js/level-worklet.js',
     'js/pwa.js',
+    'js/share-store.js',
     'js/share.js',
+    'icons/icon-96x96.png',
     'vendor/bootstrap/bootstrap.min.css',
     'vendor/bootstrap/bootstrap.bundle.min.js',
     'vendor/bootstrap-icons/bootstrap-icons.min.css',
@@ -413,7 +515,7 @@ def build_manifest() -> Dict[str, Any]:
         "id": "/",
         "name": "FileRoom - Ephemeral File Sharing",
         "short_name": "FileRoom",
-        "description": "Share files, messages, voice notes and locations in temporary rooms",
+        "description": "Share files, messages, voice notes and locations in temporary rooms; encrypted calls and babyphone",
         "lang": "en",
         "start_url": "/?source=pwa",
         "scope": "/",
@@ -489,8 +591,13 @@ def shell_response(name: str) -> HTMLResponse:
 # ---------------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    # Rooms and file keys live in memory, so whatever a previous run left on disk is unreadable garbage.
+    for path in UPLOAD_DIR.iterdir():
+        if path.is_file():
+            remove_file(path)
     task = asyncio.create_task(cleanup_loop())
-    logger.info("FileRoom %s started", APP_VERSION)
+    logger.info("FileRoom %s started, files on disk in %s (limit %d MB)", APP_VERSION, UPLOAD_DIR,
+                MAX_STORAGE_SIZE // (1024 * 1024))
     yield
     task.cancel()
 
@@ -514,6 +621,7 @@ async def security_headers(request: Request, call_next):
     response = await call_next(request)
     response.headers.setdefault('X-Content-Type-Options', 'nosniff')
     response.headers.setdefault('Referrer-Policy', 'same-origin')
+    response.headers.setdefault('Permissions-Policy', 'microphone=(self), camera=(self), geolocation=(self)')
     return response
 
 
@@ -527,9 +635,12 @@ async def home(request: Request, share: Optional[str] = None, source: Optional[s
     target = None
     if source == 'pwa':
         target = normalize_room_code(request.cookies.get('fileroom_last_room'))
-    url = room_path(target or generate_room_code())
+    # A freshly created random room is marked "new": the first device creates a room key for it
+    # (end-to-end encryption). The key itself only ever lives in the URL fragment on the devices.
+    query = [] if target else ['new=1']
     if shareError:
-        url += f"?shareError={quote(shareError)}"
+        query.append(f"shareError={quote(shareError)}")
+    url = room_path(target or generate_room_code()) + (f"?{'&'.join(query)}" if query else '')
     return RedirectResponse(url, status_code=302, headers={'Cache-Control': 'no-store'})
 
 
@@ -587,11 +698,12 @@ async def check_room_code(room_code: str):
 
 
 @app.get("/api/join/{room_code}")
-async def join_room(room_code: str, user_id: Optional[str] = None, user_name: Optional[str] = None):
+async def join_room(room_code: str, user_id: Optional[str] = None, user_name: Optional[str] = None, anon: int = 0):
     code = require_room_code(room_code)
     ensure_room(code)
     touch_room(code)
-    name = clean_name(user_name)
+    # anon: the device wants to be anonymous here (again): it gets a fresh random name.
+    name = generate_user_name() if anon else clean_name(user_name)
 
     user = users_db.get(user_id or '')
     if user and user['room'] == code:
@@ -683,6 +795,15 @@ async def send_message(request: Request, room_code: str):
         if len(text) > MAX_TEXT_LENGTH:
             raise HTTPException(413, f"Message too long (max {MAX_TEXT_LENGTH} characters)")
         msg = new_message(code, user_id, username, 'text', text=text)
+    elif msg_type == 'sealed':
+        data = params.get('data')
+        if not isinstance(data, str) or not data:
+            raise HTTPException(400, "Missing encrypted message")
+        if len(data) > MAX_SEALED_LENGTH:
+            raise HTTPException(413, "Message too long")
+        if not SEALED_RE.match(data):
+            raise HTTPException(400, "Invalid encrypted message")
+        msg = new_message(code, user_id, username, 'sealed', data=data)
     else:
         raise HTTPException(400, "Unknown message type")
 
@@ -692,8 +813,12 @@ async def send_message(request: Request, room_code: str):
 
 @app.post("/api/upload/{room_code}")
 async def upload_file(request: Request, room_code: str, user_id: Optional[str] = None,
-                      message_type: str = "file"):
+                      message_type: str = "file", enc: int = 0, meta: Optional[str] = None):
     code = require_room_code(room_code)
+    if enc:
+        # End-to-end encrypted upload: the body is ciphertext, name/type/size travel sealed in 'meta'.
+        if not meta or len(meta) > 4096 or not SEALED_RE.match(meta):
+            raise HTTPException(400, "Encrypted uploads need sealed metadata")
     try:
         form = await request.form(max_files=1000, max_fields=1000)
     except Exception as exc:
@@ -706,15 +831,23 @@ async def upload_file(request: Request, room_code: str, user_id: Optional[str] =
     uploaded, rejected = [], []
     try:
         for upload in uploads:
-            name = sanitize_filename(upload.filename, 'voice_message' if message_type == 'voice' else 'file')
-            mime = guess_mime(name, upload.content_type)
-            msg = new_message(code, user_id, username, classify(mime, message_type),
-                              original_name=name, mime=mime, size=0)
+            free = MAX_STORAGE_SIZE - storage_used()
+            if enc:
+                name, mime = 'encrypted', 'application/octet-stream'
+                msg = new_message(code, user_id, username, 'file', original_name=name, mime=mime, size=0,
+                                  enc=True, meta=meta)
+            else:
+                name = sanitize_filename(upload.filename, 'voice_message' if message_type == 'voice' else 'file')
+                mime = guess_mime(name, upload.content_type)
+                msg = new_message(code, user_id, username, classify(mime, message_type),
+                                  original_name=name, mime=mime, size=0, key=new_file_key())
             msg['filename'] = msg['id']
             try:
-                msg['size'] = await save_upload(upload, file_path_for(msg), MAX_FILE_SIZE)
+                msg['size'] = await save_upload(upload, file_path_for(msg), min(MAX_FILE_SIZE, max(free, 0)),
+                                                msg.get('key'))
             except ValueError:
-                rejected.append({'name': name, 'reason': f'larger than {MAX_FILE_SIZE // (1024 * 1024)} MB'})
+                rejected.append({'name': name, 'reason': f'larger than {MAX_FILE_SIZE // (1024 * 1024)} MB'
+                                 if free >= MAX_FILE_SIZE else 'larger than the space left on the server'})
                 continue
             if msg['size'] == 0:
                 remove_file(file_path_for(msg))
@@ -767,14 +900,83 @@ def get_file_message(message_id: str) -> Dict[str, Any]:
 
 
 @app.get("/api/download/{message_id}")
-async def download_file(message_id: str):
+async def download_file(message_id: str, request: Request):
     msg = get_file_message(message_id)
     # Always served as an attachment with its real type: <img>/<audio>/<video> can still embed it,
     # while opening it directly never renders user content as a page on this origin.
-    response = FileResponse(file_path_for(msg), media_type=msg['mime'], filename=msg['original_name'])
+    if msg.get('key'):
+        response = decrypted_response(msg, request.headers.get('range'))
+    else:  # ciphertext from the browser: sent straight from disk
+        response = FileResponse(file_path_for(msg), media_type=msg['mime'], filename=msg['original_name'])
     response.headers['Content-Security-Policy'] = "default-src 'none'; sandbox"
     response.headers['Cache-Control'] = 'private, max-age=3600'
     return response
+
+
+def decrypted_response(msg: Dict[str, Any], range_header: Optional[str]) -> Response:
+    """Stream a server-encrypted file, with Range support (seeking in videos and voice messages)."""
+    size = msg['size']
+    start, end, status = 0, size - 1, 200
+    match = re.fullmatch(r'bytes=(\d*)-(\d*)', (range_header or '').strip())
+    if match and (match[1] or match[2]):
+        if match[1]:
+            start = int(match[1])
+            end = min(int(match[2]), size - 1) if match[2] else size - 1
+        else:
+            start = max(0, size - int(match[2]))
+        if start > end or start >= size:
+            return Response(status_code=416, headers={'Content-Range': f'bytes */{size}'})
+        status = 206
+    headers = {'Content-Length': str(end - start + 1), 'Accept-Ranges': 'bytes',
+               'Content-Disposition': f"attachment; filename*=utf-8''{quote(msg['original_name'])}"}
+    if status == 206:
+        headers['Content-Range'] = f'bytes {start}-{end}/{size}'
+    return StreamingResponse(read_stored(msg, start, end - start + 1), status_code=status,
+                             media_type=msg['mime'], headers=headers)
+
+
+class _ZipSink:
+    """Write-only, non-seekable "file": lets zipfile produce an archive that is sent while it is built."""
+    def __init__(self) -> None:
+        self.parts: List[bytes] = []
+        self.position = 0
+
+    def write(self, data) -> int:
+        self.parts.append(bytes(data))
+        self.position += len(data)
+        return len(data)
+
+    def tell(self) -> int:
+        return self.position
+
+    def flush(self) -> None:
+        pass
+
+    def take(self) -> bytes:
+        data = b''.join(self.parts)
+        self.parts.clear()
+        return data
+
+
+def zip_stream(msgs: List[Dict[str, Any]], tz: int):
+    """ZIP archive as a stream of chunks: nothing is buffered in memory or written to disk."""
+    sink, used = _ZipSink(), set()
+    with zipfile.ZipFile(sink, 'w', zipfile.ZIP_STORED, allowZip64=True) as zf:
+        for msg in msgs:
+            stamp = time.gmtime(msg['timestamp'] - tz * 60)[:6]
+            if msg['type'] in FILE_TYPES:
+                if not file_path_for(msg).exists():
+                    continue  # deleted in the meantime
+                info = zipfile.ZipInfo(unique_name(msg['original_name'], used), date_time=stamp)
+                with zf.open(info, 'w', force_zip64=msg['size'] >= 2 ** 31) as entry:
+                    for chunk in read_stored(msg):
+                        entry.write(chunk)
+                        yield sink.take()
+            else:
+                zf.writestr(zipfile.ZipInfo(unique_name(text_filename(msg, tz), used), date_time=stamp),
+                            message_text(msg) + '\n')
+            yield sink.take()
+    yield sink.take()
 
 
 def unique_name(name: str, used: Set[str]) -> str:
@@ -795,6 +997,7 @@ def text_filename(msg: Dict[str, Any], tz_offset_minutes: int) -> str:
 
 
 def message_text(msg: Dict[str, Any]) -> Optional[str]:
+    """Readable text of a message for ZIP archives (None for files and for ciphertext)."""
     if msg['type'] == 'text':
         return msg['text']
     if msg['type'] == 'location':
@@ -816,26 +1019,173 @@ async def download_zip(room_code: str, ids: Optional[str] = None, tz: int = Quer
         msg = messages_db.get(mid)
         if not msg or msg['room'] != code or msg['expiry'] <= now():
             continue
+        if msg.get('enc'):
+            continue  # encrypted files are downloaded and decrypted by the client, one by one
         if (msg['type'] in FILE_TYPES and file_path_for(msg).exists()) or message_text(msg):
             msgs.append(msg)
     if not msgs:
         raise HTTPException(404, "Nothing to download")
 
-    def build_zip() -> str:
-        fd, path = tempfile.mkstemp(prefix='fileroom-zip-', suffix='.zip')
-        used: Set[str] = set()
-        with os.fdopen(fd, 'wb') as fh, zipfile.ZipFile(fh, 'w', zipfile.ZIP_STORED, allowZip64=True) as zf:
-            for msg in msgs:
-                if msg['type'] in FILE_TYPES:
-                    zf.write(file_path_for(msg), unique_name(msg['original_name'], used))
-                else:
-                    zf.writestr(unique_name(text_filename(msg, tz), used), message_text(msg) + '\n')
-        return path
-
-    path = await asyncio.to_thread(build_zip)
     filename = f"FileRoom-{code}-{time.strftime('%Y%m%d-%H%M')}.zip"
-    return FileResponse(path, media_type='application/zip', filename=filename,
-                        background=BackgroundTask(remove_file, Path(path)))
+    return StreamingResponse(zip_stream(msgs, tz), media_type='application/zip',
+                             headers={'Content-Disposition': f'attachment; filename="{quote(filename)}"',
+                                      'Cache-Control': 'no-store'})
+
+
+# ----- Calls & babyphone: signaling relay, ICE servers, push relay ------------
+async def send_to_user(code: str, uid: str, text: str) -> bool:
+    delivered = False
+    for ws in list(connections.get(code, {}).get(uid, ())):
+        try:
+            await asyncio.wait_for(ws.send_text(text), timeout=10)
+            delivered = True
+        except Exception as exc:
+            logger.info("Dropping websocket of %s: %s", uid, exc)
+            drop_connection(code, uid, ws)
+    return delivered
+
+
+async def relay_signal(code: str, sender: str, raw: str, bucket: List[float]) -> Optional[Dict[str, Any]]:
+    """Pass one signaling frame {"type": "signal", "to": <user id or null>, "data": <string>} on to
+    one device or to everybody else in the room. The server neither reads nor stores `data` (with a
+    room key it is ciphertext) and never sends it to another room. Returns an error for the sender."""
+    if len(raw) > MAX_SIGNAL_LENGTH + 512:
+        return {'reason': 'too-large'}
+    try:
+        frame = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(frame, dict) or frame.get('type') != 'signal':
+        return None
+    data, to = frame.get('data'), frame.get('to')
+    if not isinstance(data, str) or not data or len(data) > MAX_SIGNAL_LENGTH or not (to is None or isinstance(to, str)):
+        return {'reason': 'invalid'}
+    if to == sender:
+        return None
+
+    t = time.monotonic()
+    bucket[0] = min(float(SIGNAL_BURST), bucket[0] + (t - bucket[1]) * SIGNAL_RATE)
+    bucket[1] = t
+    if bucket[0] < 1:
+        if t - bucket[2] < 1 and bucket[2]:
+            return None  # do not answer a flood with a flood
+        bucket[2] = t
+        return {'reason': 'rate'}
+    bucket[0] -= 1
+
+    payload: Dict[str, Any] = {'type': 'signal', 'from': sender, 'data': data}
+    if to is not None:
+        payload['to'] = to
+        if to not in connections.get(code, {}) or not await send_to_user(code, to, json.dumps(payload)):
+            return {'reason': 'offline', 'to': to}
+        return None
+    text = json.dumps(payload)
+    await asyncio.gather(*(send_to_user(code, uid, text) for uid in list(connections.get(code, {})) if uid != sender))
+    return None
+
+
+def require_user(user_id: Optional[str]) -> Dict[str, Any]:
+    user = users_db.get(user_id or '')
+    if not user:
+        raise HTTPException(403, "Join a room first")
+    return user
+
+
+@app.get("/api/ice")
+async def ice_servers(user_id: Optional[str] = None):
+    """ICE servers for WebRTC. TURN credentials are short-lived and derived from a shared secret
+    (coturn "use-auth-secret"), so the TURN server needs no user database and cannot be used by strangers."""
+    require_user(user_id)
+    servers: List[Dict[str, Any]] = []
+    if STUN_URLS:
+        servers.append({'urls': STUN_URLS})
+    if TURN_URLS and TURN_SECRET:
+        username = f"{int(now()) + TURN_TTL_SECONDS}:{secrets.token_urlsafe(6)}"
+        credential = base64.b64encode(hmac.new(TURN_SECRET.encode(), username.encode(), hashlib.sha1).digest()).decode()
+        servers.append({'urls': TURN_URLS, 'username': username, 'credential': credential})
+    return JSONResponse({'iceServers': servers, 'ttl': TURN_TTL_SECONDS, 'push_relay': PUSH_RELAY},
+                        headers={'Cache-Control': 'no-store'})
+
+
+def push_host_allowed(host: str) -> bool:
+    host = (host or '').lower().rstrip('.')
+    return any(host == allowed.lstrip('.') if not allowed.startswith('.') else host.endswith(allowed)
+               for allowed in (a.lower() for a in PUSH_HOSTS))
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):  # a push service never redirects; do not follow anywhere
+        return None
+
+
+def forward_push(endpoint: str, headers: Dict[str, str], body: bytes) -> int:
+    """POST one encrypted notification to a push service. Returns its HTTP status."""
+    request = urllib.request.Request(endpoint, data=body, headers=headers, method='POST')
+    try:
+        with urllib.request.build_opener(_NoRedirect).open(request, timeout=10) as response:
+            return response.status
+    except urllib.error.HTTPError as exc:
+        return exc.code
+
+
+@app.post("/api/push")
+async def push_relay(request: Request):
+    """Forward a Web Push message that a baby station encrypted (RFC 8291) and signed (VAPID, RFC 8292)
+    for a parent phone. The server holds no keys and no subscriptions and cannot read the message.
+    It only talks to well-known push services, so it cannot be used to reach arbitrary hosts."""
+    if not PUSH_RELAY:
+        raise HTTPException(404, "Push relay is disabled")
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Invalid JSON")
+    user = require_user(body.get('user_id'))
+
+    endpoint, auth, topic = body.get('endpoint'), body.get('auth'), body.get('topic')
+    if not isinstance(endpoint, str) or len(endpoint) > 2048:
+        raise HTTPException(400, "Invalid endpoint")
+    try:
+        url = urlsplit(endpoint)
+        port = url.port
+    except ValueError:
+        raise HTTPException(400, "Invalid endpoint")
+    if (url.scheme != 'https' or url.username is not None or url.password is not None or port not in (None, 443)
+            or not push_host_allowed(url.hostname or '')):
+        raise HTTPException(400, "Endpoint is not a known push service")
+    if not isinstance(auth, str) or len(auth) > 2048 or not VAPID_RE.match(auth):
+        raise HTTPException(400, "Invalid authorization")
+    try:
+        raw = body.get('body')
+        payload = base64.urlsafe_b64decode(raw + '=' * (-len(raw) % 4)) if isinstance(raw, str) and SEALED_RE.match(raw) else b''
+    except (binascii.Error, ValueError):
+        payload = b''
+    if not payload or len(payload) > PUSH_MAX_BODY:
+        raise HTTPException(400, "Invalid body")
+    try:
+        ttl = max(0, min(3600, int(body.get('ttl', 120))))
+    except (TypeError, ValueError):
+        ttl = 120
+
+    t = time.monotonic()
+    bucket = push_buckets.setdefault(user['id'], [float(PUSH_BURST), t])
+    bucket[0] = min(float(PUSH_BURST), bucket[0] + (t - bucket[1]) * PUSH_RATE)
+    bucket[1] = t
+    if bucket[0] < 1:
+        raise HTTPException(429, "Too many notifications")
+    bucket[0] -= 1
+
+    headers = {'Authorization': auth, 'Content-Encoding': 'aes128gcm', 'Content-Type': 'application/octet-stream',
+               'TTL': str(ttl), 'Urgency': body.get('urgency') if body.get('urgency') in ('very-low', 'low', 'normal', 'high') else 'high'}
+    if isinstance(topic, str) and TOPIC_RE.match(topic):
+        headers['Topic'] = topic
+    try:
+        status = await asyncio.to_thread(forward_push, endpoint, headers, payload)
+    except Exception as exc:
+        logger.info("Push relay failed: %s", type(exc).__name__)
+        raise HTTPException(502, "Push service not reachable")
+    return {"success": True, "status": status}
 
 
 # ----- WebSocket -----------------------------------------------------------
@@ -856,6 +1206,7 @@ async def websocket_endpoint(websocket: WebSocket, room_code: str, user_id: str)
         room_users[code].add(user_id)
         await broadcast_to_room(code, {'type': 'user_joined', 'user_id': user_id, 'user_name': user['name']})
 
+    bucket = [float(SIGNAL_BURST), time.monotonic(), 0.0]  # tokens, last refill, last "rate" notice
     try:
         await websocket.send_json({'type': 'users_list', 'users': active_users(code)})
         while True:
@@ -863,6 +1214,10 @@ async def websocket_endpoint(websocket: WebSocket, room_code: str, user_id: str)
             user['last_seen'] = now()
             if data == 'ping':
                 await websocket.send_json({'type': 'pong'})
+            elif data.startswith('{'):
+                error = await relay_signal(code, user_id, data, bucket)
+                if error:
+                    await websocket.send_json({'type': 'signal_error', **error})
     except WebSocketDisconnect:
         pass
     except Exception as exc:
@@ -873,77 +1228,60 @@ async def websocket_endpoint(websocket: WebSocket, room_code: str, user_id: str)
 
 
 # ----- Share target (incoming shares from other apps) ----------------------
-async def parse_share_form(request: Request, body: bytes) -> Dict[str, Any]:
-    """Return {'title', 'text', 'url', 'files': [(filename, content_type, bytes)]}."""
-    result: Dict[str, Any] = {'title': None, 'text': None, 'url': None, 'files': []}
-    try:
-        form = await request.form(max_files=1000, max_fields=1000)
-        try:
-            for key, value in form.multi_items():
-                if isinstance(value, StarletteUploadFile):
-                    await value.seek(0)
-                    content = await value.read()
-                    result['files'].append((value.filename, value.content_type, content))
-                elif key in ('title', 'text', 'url'):
-                    result[key] = str(value).strip() or None
-        finally:
-            await form.close()
-        return result
-    except Exception as exc:
-        logger.warning("Standard form parsing failed (%s), using fallback parser", exc)
-
-    # Fallback for browsers that send slightly non-standard multipart bodies.
-    content_type = request.headers.get('content-type', '')
-    if 'multipart/' not in content_type:
-        raise ValueError("Unsupported content type")
-    msg = message_from_bytes(f"MIME-Version: 1.0\r\nContent-Type: {content_type}\r\n\r\n".encode() + body,
-                             policy=email_default_policy)
-    if not msg.is_multipart():
-        raise ValueError("Malformed multipart body")
-    for part in msg.iter_parts():
-        name = part.get_param('name', header='content-disposition')
-        filename = part.get_filename()
-        content = part.get_payload(decode=True) or b''
-        if filename is not None or (name == 'files'):
-            result['files'].append((filename, part.get_content_type(), content))
-        elif name in ('title', 'text', 'url'):
-            result[name] = content.decode(part.get_content_charset() or 'utf-8', errors='replace').strip() or None
-    return result
-
-
 @app.post("/share")
 async def handle_share_target(request: Request):
-    """PWA Web Share Target: receives text, links and any number of files from other apps."""
+    """PWA Web Share Target: receives text, links and any number of files from other apps.
+
+    Installed apps normally never get here: their service worker keeps the shared content on the
+    phone, so it can be encrypted with the room key before upload. This is the fallback (first start
+    after installing, service worker not active). Files go straight to disk, encrypted at rest."""
     request_id = secrets.token_urlsafe(6)
     try:
-        length = int(request.headers.get('content-length') or 0)
-        if length > MAX_SHARE_SIZE:
+        if int(request.headers.get('content-length') or 0) > MAX_SHARE_SIZE:
             return RedirectResponse(url="/?shareError=too-large", status_code=303)
-        body = await request.body()  # cached, so the fallback parser can re-read it
-        if len(body) > MAX_SHARE_SIZE:
-            return RedirectResponse(url="/?shareError=too-large", status_code=303)
-        data = await parse_share_form(request, body)
+        form = await request.form(max_files=1000, max_fields=1000)  # spools large parts to temp files
     except Exception:
         logger.exception("[%s] Share parsing failed", request_id)
         return RedirectResponse(url="/?shareError=invalid", status_code=303)
 
     session_id = secrets.token_urlsafe(16)
-    files, skipped = [], []
-    for index, (filename, content_type, content) in enumerate(data['files']):
-        mime_guess = (content_type or '').split(';')[0].strip().lower()
-        ext = mimetypes.guess_extension(mime_guess) if mime_guess else None
-        name = sanitize_filename(filename, f"shared-{index + 1}{ext or ''}")
-        if not content:
-            skipped.append(name)
-            continue
-        if len(content) > MAX_FILE_SIZE:
-            skipped.append(name)
-            continue
-        mime = guess_mime(name, content_type)
-        temp_name = f"share_{session_id}_{index}"
-        (UPLOAD_DIR / temp_name).write_bytes(content)
-        files.append({'temp_name': temp_name, 'original_name': name, 'size': len(content),
-                      'mime': mime, 'type': classify(mime)})
+    data: Dict[str, Optional[str]] = {'title': None, 'text': None, 'url': None}
+    files, skipped, total = [], [], 0
+    try:
+        for field, value in form.multi_items():
+            is_upload = isinstance(value, StarletteUploadFile)
+            if not is_upload and field != 'files':
+                if field in data:
+                    data[field] = str(value).strip() or None
+                continue
+            # Some browsers send files without a plain "filename" (only filename*=): those arrive as text.
+            content_type = value.content_type if is_upload else 'text/plain'
+            mime_guess = (content_type or '').split(';')[0].strip().lower()
+            ext = mimetypes.guess_extension(mime_guess) if mime_guess else None
+            index = len(files) + len(skipped)
+            name = sanitize_filename(value.filename if is_upload else None, f"shared-{index + 1}{ext or ''}")
+            mime = guess_mime(name, content_type)
+            temp_name, key = f"share_{session_id}_{index}", new_file_key()
+            limit = min(MAX_FILE_SIZE, MAX_SHARE_SIZE - total, max(MAX_STORAGE_SIZE - storage_used() - total, 0))
+            try:
+                if is_upload:
+                    size = await save_upload(value, UPLOAD_DIR / temp_name, limit, key)
+                else:
+                    raw = str(value).encode()
+                    size = len(raw) if len(raw) <= limit else -1
+                    if size > 0:
+                        (UPLOAD_DIR / temp_name).write_bytes(file_cipher(key).update(raw))
+            except ValueError:
+                size = -1
+            if size <= 0:
+                remove_file(UPLOAD_DIR / temp_name)
+                skipped.append(name)
+                continue
+            total += size
+            files.append({'temp_name': temp_name, 'original_name': name, 'size': size,
+                          'mime': mime, 'type': classify(mime), 'key': key})
+    finally:
+        await form.close()
 
     title, text, url = data['title'], data['text'], data['url']
     if not (title or text or url or files):
@@ -1021,7 +1359,7 @@ async def upload_shared_files(session_id: str, room_code: str, user_id: Optional
     for info in session['files']:
         temp = UPLOAD_DIR / info['temp_name']
         msg = new_message(code, user_id, username, info['type'], original_name=info['original_name'],
-                          mime=info['mime'], size=info['size'])
+                          mime=info['mime'], size=info['size'], key=info['key'])
         msg['filename'] = msg['id']
         try:
             shutil.move(str(temp), str(file_path_for(msg)))

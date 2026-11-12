@@ -214,3 +214,14 @@ def test_zip_contains_texts_as_timestamp_txt(client):
     texts = [n for n in names if n != "a.txt"]
     assert len(texts) == 2 and all(re.fullmatch(r"\d{4}-\d\d-\d\d_\d\d-\d\d-\d\d( \(\d\))?\.txt", n) for n in texts)
     assert sorted(z.read(n).decode().strip() for n in texts) == ["first", "second"]
+
+
+def test_join_anonymous_gets_a_random_name(client):
+    """A device that wants to be anonymous (again) asks for a fresh random name instead of sending one."""
+    user = client.get("/api/join/ANON", params={"user_name": "Alice"}).json()
+    assert user["user_name"] == "Alice"
+    again = client.get("/api/join/ANON", params={"user_id": user["user_id"], "anon": 1}).json()
+    assert again["user_id"] == user["user_id"]
+    assert again["user_name"] != "Alice" and again["user_name"]
+    fresh = client.get("/api/join/ANON", params={"anon": 1, "user_name": "Mallory"}).json()
+    assert fresh["user_name"] != "Mallory"

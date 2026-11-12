@@ -2,6 +2,12 @@
  * FileRoom chat client.
  * The room page is a static app shell (cached by the service worker); the room code comes from the URL
  * and all content is loaded from the API / WebSocket.
+ *
+ * End-to-end encryption: a room can have a key (random, carried in the URL fragment "#k=…" of the
+ * invite link / QR code, or a password everybody types). With a key, texts, locations, files and
+ * call signaling are encrypted on the device (see e2ee.js); the server stores and relays ciphertext.
+ *
+ * window.fileroom is the small interface used by voice.js (calls and babyphone).
  */
 (() => {
     'use strict';
@@ -16,11 +22,19 @@
     const RECENT_KEY = 'fileroom_recent_rooms';
     const FILE_TYPES = new Set(['file', 'image', 'video', 'voice']);
     const CAN_SHARE = typeof navigator.share === 'function';
+    const C = window.FileRoomCrypto;
+    const CAN_ENCRYPT = Boolean(C && window.crypto?.subtle); // WebCrypto needs HTTPS (or localhost)
+    const AUTO_DECRYPT_LIMIT = 30 * 1024 * 1024;             // larger encrypted media is loaded on tap
 
     const $ = (id) => document.getElementById(id);
     const state = {
         roomCode: null,
         user: null,
+        users: [],
+        ready: false,
+        secret: null,              // room secret (random key or password); never sent to the server
+        keys: null,                // keys derived from it (FileRoomCrypto.deriveRoomKeys)
+        objectUrls: new Map(),     // id -> blob: URL of a decrypted file
         ws: null,
         wsPing: null,
         reconnectTimer: null,
@@ -49,6 +63,18 @@
         set(key, value) { try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* private mode */ } },
     };
 
+    // Tiny event hub for voice.js: signal, signal-error, ws-open, ws-close, users, user-left, rejoin, key, ready
+    const listeners = new Map();
+    function on(event, fn) {
+        if (!listeners.has(event)) listeners.set(event, []);
+        listeners.get(event).push(fn);
+    }
+    function emit(event, ...args) {
+        for (const fn of listeners.get(event) || []) {
+            try { fn(...args); } catch (err) { console.error(`${event} handler failed`, err); }
+        }
+    }
+
     function esc(value) {
         return String(value ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
     }
@@ -69,6 +95,7 @@
     const roomUrl = (code) => `/room/${encodeURIComponent(code)}`;
     const serverNow = () => Date.now() / 1000 + state.clockOffset;
     const isFileMsg = (msg) => msg && FILE_TYPES.has(msg.type);
+    const isPrivate = (msg) => Boolean(msg && (msg.sealed || msg.enc)); // the server only has ciphertext
     const downloadUrl = (id) => `/api/download/${encodeURIComponent(id)}`;
 
     function formatTime(seconds) {
@@ -227,22 +254,160 @@
             };
             showToast(messages[error] || 'Sharing failed. Please try again.', 'warning', 7000);
         }
-        if (params.has('shareError') || params.has('source')) {
+        if (params.has('shareError') || params.has('source') || params.has('new') || params.has('share') || params.has('invite')) {
             history.replaceState(null, '', roomUrl(state.roomCode) + location.hash);
         }
     }
+
+    // ======================================================================
+    // Room key (end-to-end encryption)
+    // ======================================================================
+    const keyStore = () => `fileroom_key_${state.roomCode}`;
+
+    function secretFromHash() {
+        const match = location.hash.match(/^#k=(.+)$/);
+        if (!match) return null;
+        try { return decodeURIComponent(match[1]) || null; } catch { return null; }
+    }
+
+    /** Link to this room; with a key it carries the key in the fragment, which browsers never send to a server. */
+    function inviteUrl() {
+        return location.origin + roomUrl(state.roomCode) + (state.secret ? `#k=${encodeURIComponent(state.secret)}` : '');
+    }
+
+    async function setSecret(secret, { initial = false } = {}) {
+        secret = secret || null;
+        if (secret && !CAN_ENCRYPT) {
+            showToast('Encryption needs HTTPS (or localhost). This room is used without a key.', 'warning', 7000);
+            secret = null;
+        }
+        const changed = secret !== state.secret;
+        state.secret = secret;
+        state.keys = secret ? await C.deriveRoomKeys(secret, state.roomCode) : null;
+        if (secret) storage.set(keyStore(), secret);
+        else { try { localStorage.removeItem(keyStore()); } catch { /* ignore */ } }
+        const url = roomUrl(state.roomCode) + location.search + (secret ? `#k=${encodeURIComponent(secret)}` : '');
+        if (location.pathname + location.search + location.hash !== url) history.replaceState(null, '', url);
+        updateKeyUi();
+        if (initial || !changed) return;
+        // Everything on screen was decoded with the old key: load and decode it again.
+        clearMessages();
+        for (const url of state.objectUrls.values()) URL.revokeObjectURL(url);
+        state.objectUrls.clear();
+        refreshData();
+        emit('key');
+    }
+
+    async function initKey() {
+        const isNew = new URLSearchParams(location.search).has('new');
+        let secret = secretFromHash() || storage.get(keyStore());
+        // A room that was just created gets a random key: encrypted by default, nothing to remember.
+        if (!secret && isNew && CAN_ENCRYPT) secret = C.randomSecret();
+        try {
+            await setSecret(secret, { initial: true });
+        } catch (err) {
+            console.error('Room key could not be set up', err);
+            updateKeyUi();
+        }
+    }
+
+    function updateKeyUi() {
+        const secure = Boolean(state.keys);
+        const button = $('keyBtn');
+        if (button) {
+            button.classList.toggle('secure', secure);
+            button.title = secure ? 'End-to-end encrypted – room key' : 'Not encrypted – set a room key';
+            button.querySelector('i').className = `bi ${secure ? 'bi-lock-fill' : 'bi-unlock'}`;
+        }
+        $('messageInput').placeholder = secure ? 'Type an encrypted message' : 'Type a message...';
+        const status = $('keyStatus');
+        if (!status) return;
+        status.className = `voice-security ${secure ? 'secure' : 'open'}`;
+        status.innerHTML = secure
+            ? '<i class="bi bi-shield-lock-fill"></i><span><strong>End-to-end encrypted.</strong> Messages, files, calls and the babyphone can only be read by devices that have this room\'s key. The server never sees it.</span>'
+            : CAN_ENCRYPT
+                ? '<i class="bi bi-unlock"></i><span><strong>No room key.</strong> Anyone who knows the room name can read along, and the server could too. Set a password or create a key to encrypt this room.</span>'
+                : '<i class="bi bi-exclamation-triangle-fill"></i><span>Encryption needs HTTPS (or localhost).</span>';
+        for (const el of document.querySelectorAll('[data-needs-key]')) el.classList.toggle('d-none', !secure);
+        $('keyForm').classList.toggle('d-none', !CAN_ENCRYPT);
+    }
+
+    /** Server message -> message as displayed. Encrypted ones are opened with the room key or shown as locked. */
+    async function decodeMessage(msg) {
+        if (!msg || (msg.type !== 'sealed' && !msg.enc)) return msg;
+        const locked = (reason) => ({ ...msg, type: 'locked', reason, enc: false });
+        if (!state.keys) return locked('nokey');
+        try {
+            if (msg.type === 'sealed') {
+                const value = await C.open(state.keys, 'msg', msg.data);
+                if (value?.t === 'text' && typeof value.text === 'string') return { ...msg, type: 'text', text: value.text, sealed: true };
+                if (value?.t === 'location' && Number.isFinite(Number(value.latitude)) && Number.isFinite(Number(value.longitude))) {
+                    return { ...msg, type: 'location', latitude: Number(value.latitude), longitude: Number(value.longitude), sealed: true };
+                }
+                return locked('damaged');
+            }
+            const meta = await C.open(state.keys, 'meta', msg.meta);
+            return {
+                ...msg, type: FILE_TYPES.has(meta.kind) ? meta.kind : 'file',
+                filename: String(meta.name || 'file').replace(/[\\/\u0000-\u001f]/g, '_').slice(0, 200), mime: String(meta.type || 'application/octet-stream').slice(0, 100),
+                size: Number(meta.size) || 0, sealed: true,
+            };
+        } catch (err) {
+            return locked(err?.wrongKey ? 'otherkey' : 'damaged');
+        }
+    }
+
+    // Decoding is asynchronous; a queue keeps messages in the order they arrived.
+    let intake = Promise.resolve();
+    function enqueue(job) {
+        intake = intake.then(job).catch((err) => console.error('Message handling failed', err));
+        return intake;
+    }
+    const receiveMessage = (raw, animate) => enqueue(async () => addMessage(await decodeMessage(raw), animate));
+    const receiveList = (list) => enqueue(async () => syncMessages(await Promise.all(list.map(decodeMessage))));
+
+    function classify(mime, requested) {
+        if (requested === 'voice' && (mime.startsWith('audio/') || mime.startsWith('video/webm'))) return 'voice';
+        if (mime.startsWith('image/')) return 'image';
+        if (mime.startsWith('video/')) return 'video';
+        if (mime.startsWith('audio/')) return 'voice';
+        return 'file';
+    }
+
+    /** blob: URL of a file; encrypted files are downloaded and decrypted first. */
+    async function objectUrl(id) {
+        if (state.objectUrls.has(id)) return state.objectUrls.get(id);
+        const file = await fetchFile(id);
+        if (!state.messages.has(id)) throw new Error('Message was deleted');
+        if (!state.objectUrls.has(id)) state.objectUrls.set(id, URL.createObjectURL(file));
+        return state.objectUrls.get(id);
+    }
+    const mediaUrl = async (id) => (state.messages.get(id)?.enc ? objectUrl(id) : downloadUrl(id));
 
     // ======================================================================
     // User & connection
     // ======================================================================
     function userKey() { return `fileroom_user_${state.roomCode}`; }
 
-    async function joinRoom(newName) {
+    /**
+     * The name of this device, kept for all rooms: { name, public }.
+     * public = false: only known devices learn it (encrypted, see contacts.js); the server and everyone
+     * else see a random name per room. No name at all: anonymous everywhere.
+     */
+    function getProfile() {
+        const profile = storage.get('fileroom_profile') || {};
+        const name = typeof profile.name === 'string' ? profile.name.trim().slice(0, 20) : '';
+        return { name: name || null, public: Boolean(name) && profile.public !== false };
+    }
+
+    async function joinRoom(newName, { anonymous = false } = {}) {
         const stored = storage.get(userKey());
         const params = new URLSearchParams();
         if (stored?.id) params.set('user_id', stored.id);
-        const name = newName || stored?.name;
-        if (name) params.set('user_name', name);
+        const profile = getProfile();
+        const name = newName || (profile.public ? profile.name : stored?.name);
+        if (anonymous) params.set('anon', '1'); // a fresh random name from the server
+        else if (name) params.set('user_name', name);
         const data = await api(`/api/join/${encodeURIComponent(state.roomCode)}?${params}`);
         if (data.room_code && data.room_code !== state.roomCode) setRoomCode(data.room_code);
         state.user = { id: data.user_id, name: data.user_name };
@@ -290,6 +455,7 @@
             clearInterval(state.wsPing);
             state.wsPing = setInterval(() => { if (ws.readyState === WebSocket.OPEN) ws.send('ping'); }, 25000);
             refreshData(); // catch up on anything missed while disconnected
+            emit('ws-open');
         };
         ws.onmessage = (event) => {
             let data;
@@ -301,6 +467,7 @@
             if (state.ws === ws) state.ws = null;
             setConnection('offline');
             scheduleReconnect();
+            emit('ws-close');
         };
         ws.onerror = () => { /* onclose follows */ };
     }
@@ -318,7 +485,13 @@
                 updateUsersList(data.users);
                 break;
             case 'new_message':
-                addMessage(data.message, true);
+                receiveMessage(data.message, true);
+                break;
+            case 'signal': // call / babyphone signaling from another device in this room (opaque to the server)
+                if (typeof data.from === 'string' && typeof data.data === 'string') emit('signal', data.from, data.data, data.to || null);
+                break;
+            case 'signal_error':
+                emit('signal-error', data);
                 break;
             case 'message_deleted':
                 removeMessage(data.message_id);
@@ -330,6 +503,7 @@
             case 'user_left':
                 if (data.user_id !== state.user?.id) showToast(`${data.user_name} left`, 'info', 2500);
                 refreshUsers();
+                emit('user-left', data.user_id);
                 break;
             case 'user_renamed':
                 if (data.user_id !== state.user?.id) showToast(`${data.old_name} is now ${data.new_name}`, 'info', 2500);
@@ -343,6 +517,7 @@
                 // Server no longer knows us (e.g. restarted): register again.
                 state.user = null;
                 try { localStorage.removeItem(userKey()); } catch { /* ignore */ }
+                emit('rejoin');
                 break;
         }
     }
@@ -352,7 +527,7 @@
             const data = await api(`/api/room/${encodeURIComponent(state.roomCode)}/data`);
             state.clockOffset = data.server_time - Date.now() / 1000;
             updateUsersList(data.users);
-            syncMessages(data.messages);
+            await receiveList(data.messages);
         } catch (err) {
             console.warn('Refresh failed:', err);
         }
@@ -368,13 +543,20 @@
     function updateUsersList(users) {
         const container = $('usersList');
         if (!container || !Array.isArray(users)) return;
+        const changed = users !== state.users;
+        state.users = users;
+        if (changed) emit('users');
         if (!users.length) {
             container.innerHTML = '<div class="text-muted small">No users</div>';
             return;
         }
         container.innerHTML = users.map((u) => {
             const me = state.user && u.id === state.user.id;
-            return `<div class="user-item ${me ? 'current' : ''}"><div class="user-status"></div>${esc(u.name)}${me ? ' (you)' : ''}</div>`;
+            // Recognised from an earlier encrypted room (contacts.js) - whatever name it uses here.
+            const known = me ? null : window.fileroomContacts?.known(u.id);
+            const alias = known?.name && known.name !== u.name ? ` <small class="user-alias">${esc(known.name)}</small>` : '';
+            const badge = known?.old ? ` <i class="bi ${known.own ? 'bi-phone-fill' : known.fav ? 'bi-star-fill' : 'bi-person-check-fill'} user-known" title="${known.own ? 'Another device of yours (linked)' : 'Known device – you shared an encrypted room before'}"></i>` : '';
+            return `<div class="user-item ${me ? 'current' : ''}" data-user="${esc(u.id)}"><div class="user-status"></div>${esc(u.name)}${me ? ' (you)' : ''}${badge}${alias}</div>`;
         }).join('');
     }
 
@@ -395,11 +577,21 @@
         return `<button type="button" class="btn-msg-action" data-action="${action}" data-id="${esc(id)}" title="${title}" aria-label="${title}"><i class="bi ${icon}"></i></button>`;
     }
 
+    const LOCKED_TEXT = {
+        nokey: 'Encrypted message. Open the invite link or scan the QR code of a device that has the room key.',
+        otherkey: 'Encrypted with a different room key.',
+        damaged: 'This encrypted message is damaged and cannot be read.',
+    };
+
     function messageBody(msg) {
         const id = esc(msg.id);
-        const src = esc(downloadUrl(msg.id));
+        // Encrypted files have no usable URL: they are fetched, decrypted and shown from memory (afterInsert).
+        const src = msg.enc ? '' : ` src="${esc(downloadUrl(msg.id))}"`;
         const name = esc(msg.filename);
         switch (msg.type) {
+            case 'locked':
+                return `<div class="locked-body"><i class="bi bi-lock-fill"></i><span>${LOCKED_TEXT[msg.reason] || LOCKED_TEXT.damaged}
+                    ${msg.reason === 'damaged' ? '' : '<button type="button" class="btn-link-inline" data-action="open-key">Room key…</button>'}</span></div>`;
             case 'text':
                 return `<div class="message-content">${linkify(msg.text)}</div>`;
             case 'location': {
@@ -410,13 +602,17 @@
                     <i class="bi bi-geo-alt-fill me-1"></i>Open in Map</a> <small>${lat.toFixed(5)}, ${lng.toFixed(5)}</small></div>`;
             }
             case 'image':
-                return `<button type="button" class="image-preview" data-action="open-image" data-id="${id}" title="${name}">
-                        <img src="${src}" alt="${name}" loading="lazy">
+                return `${msg.enc && msg.size > AUTO_DECRYPT_LIMIT
+                    ? `<button type="button" class="media-load" data-action="load-media" data-id="${id}"><i class="bi bi-image"></i> Load image</button>`
+                    : `<button type="button" class="image-preview" data-action="open-image" data-id="${id}" title="${name}">
+                        <img${src} alt="${name}"${msg.enc ? '' : ' loading="lazy"'}>
                         <span class="image-overlay"><i class="bi bi-arrows-fullscreen"></i><span>View</span></span>
-                    </button>
+                    </button>`}
                     <div class="file-caption">${name} · ${formatSize(msg.size)}</div>`;
             case 'video':
-                return `<video class="video-preview" controls preload="metadata" playsinline src="${src}"></video>
+                return `${msg.enc && msg.size > AUTO_DECRYPT_LIMIT
+                    ? `<button type="button" class="media-load" data-action="load-media" data-id="${id}"><i class="bi bi-play-circle"></i> Load video</button>`
+                    : `<video class="video-preview" controls preload="metadata" playsinline${src}></video>`}
                     <div class="file-caption">${name} · ${formatSize(msg.size)}</div>`;
             case 'voice':
                 return `<div class="voice-player" id="voice-${id}">
@@ -433,7 +629,7 @@
                 return `<div class="file-info">
                         <i class="bi ${fileIcon(msg.mime, msg.filename)} file-icon"></i>
                         <div class="file-meta">
-                            <a class="file-name" href="${src}" download="${name}">${name}</a>
+                            <a class="file-name" href="${msg.enc ? '#' : esc(downloadUrl(msg.id))}" ${msg.enc ? `data-action="download-msg" data-id="${id}"` : `download="${name}"`}>${name}</a>
                             <small>${formatSize(msg.size)}</small>
                         </div>
                     </div>`;
@@ -447,7 +643,7 @@
         el.id = `msg-${msg.id}`;
         el.dataset.id = msg.id;
         const actions = [];
-        if (CAN_SHARE) actions.push(actionButton('share-msg', 'bi-share', 'Share', msg.id));
+        if (CAN_SHARE && msg.type !== 'locked') actions.push(actionButton('share-msg', 'bi-share', 'Share', msg.id));
         if (isFileMsg(msg)) actions.push(actionButton('download-msg', 'bi-download', 'Download', msg.id));
         if (msg.type === 'text' || msg.type === 'location') {
             actions.push(actionButton('copy-msg', 'bi-clipboard', 'Copy to clipboard', msg.id));
@@ -457,7 +653,7 @@
         el.innerHTML = `
             <span class="select-check" aria-hidden="true"><i class="bi bi-check-lg"></i></span>
             <div class="message-header">
-                <span class="message-user">${esc(msg.username)}</span>
+                <span class="message-user">${esc(msg.username)}${isPrivate(msg) ? ' <i class="bi bi-lock-fill msg-lock" title="End-to-end encrypted"></i>' : ''}</span>
                 <span class="message-time">${clockTime(msg.timestamp)} ${timerHtml(msg)}</span>
             </div>
             ${messageBody(msg)}
@@ -470,6 +666,43 @@
         if (msg.type === 'location') setTimeout(() => initMap(msg), 50);
         if (msg.type === 'image') {
             el.querySelector('img')?.addEventListener('load', () => maybeStickToBottom(), { once: true });
+        }
+        if (msg.enc && (msg.type === 'image' || msg.type === 'video') && msg.size <= AUTO_DECRYPT_LIMIT) loadMedia(msg.id);
+    }
+
+    /** Fetch and decrypt an encrypted image/video and show it. */
+    async function loadMedia(id) {
+        const el = $(`msg-${id}`);
+        const msg = state.messages.get(id);
+        if (!el || !msg) return;
+        const button = el.querySelector('.media-load');
+        if (button) { button.disabled = true; button.innerHTML = '<i class="bi bi-hourglass-split"></i> Decrypting…'; }
+        el.classList.add('decrypting');
+        try {
+            const url = await objectUrl(id);
+            if (button && msg.type === 'video') {
+                const video = document.createElement('video');
+                video.className = 'video-preview';
+                video.controls = true;
+                video.playsInline = true;
+                button.replaceWith(video);
+            } else if (button) {
+                const preview = document.createElement('button');
+                preview.type = 'button';
+                preview.className = 'image-preview';
+                preview.dataset.action = 'open-image';
+                preview.dataset.id = id;
+                preview.innerHTML = '<img alt=""><span class="image-overlay"><i class="bi bi-arrows-fullscreen"></i><span>View</span></span>';
+                button.replaceWith(preview);
+            }
+            const media = el.querySelector('img, video');
+            if (media) media.src = url;
+        } catch (err) {
+            if (!state.messages.has(id)) return;
+            if (button) { button.disabled = false; button.innerHTML = '<i class="bi bi-arrow-clockwise"></i> Retry'; }
+            showToast(`${msg.filename} could not be decrypted: ${err.message}`, 'danger', 6000);
+        } finally {
+            el.classList.remove('decrypting');
         }
     }
 
@@ -514,6 +747,7 @@
         state.selected.delete(id);
         state.fileCache.delete(id);
         state.fileReady.delete(id);
+        if (state.objectUrls.has(id)) { URL.revokeObjectURL(state.objectUrls.get(id)); state.objectUrls.delete(id); }
         const audio = state.audio.get(id);
         if (audio) { audio.pause(); audio.removeAttribute('src'); state.audio.delete(id); }
         const map = state.maps.get(id);
@@ -600,8 +834,10 @@
         const timeEl = player.querySelector('.voice-time');
         let audio = state.audio.get(id);
         if (!audio) {
-            audio = new Audio(downloadUrl(id));
+            audio = new Audio();
             audio.preload = 'metadata';
+            mediaUrl(id).then((url) => { audio.src = url; if (audio.dataset.autoplay) audio.play().catch(() => {}); })
+                .catch((err) => { state.audio.delete(id); showToast(`Could not load the voice message: ${err.message}`, 'danger'); });
             audio.addEventListener('loadedmetadata', () => { timeEl.textContent = formatAudioTime(audio.duration); });
             audio.addEventListener('timeupdate', () => { timeEl.textContent = formatAudioTime(audio.currentTime); });
             audio.addEventListener('ended', () => {
@@ -611,12 +847,13 @@
             });
             audio.addEventListener('pause', () => { icon.className = 'bi bi-play-fill'; player.classList.remove('playing'); });
             audio.addEventListener('play', () => { icon.className = 'bi bi-pause-fill'; player.classList.add('playing'); });
-            audio.addEventListener('error', () => showToast('This audio cannot be played here – download it instead.', 'warning'));
+            audio.addEventListener('error', () => { if (audio.src) showToast('This audio cannot be played here – download it instead.', 'warning'); });
             state.audio.set(id, audio);
         }
         if (audio.paused) {
             for (const [otherId, other] of state.audio) if (otherId !== id) other.pause();
-            audio.play().catch((err) => console.warn('Playback failed', err));
+            if (audio.src) audio.play().catch((err) => console.warn('Playback failed', err));
+            else audio.dataset.autoplay = '1'; // still being fetched/decrypted: starts when ready
         } else {
             audio.pause();
         }
@@ -627,7 +864,7 @@
         const msg = state.messages.get(id);
         if (!msg) return;
         state.currentImageId = id;
-        $('imageModalImg').src = downloadUrl(id);
+        mediaUrl(id).then((url) => { if (state.currentImageId === id) $('imageModalImg').src = url; }).catch(() => {});
         $('imageModalImg').alt = msg.filename;
         $('imageModalTitle').textContent = msg.filename;
         $('imageModalShare').classList.toggle('d-none', !CAN_SHARE);
@@ -649,17 +886,29 @@
         if (!text) return;
         try {
             await ensureJoined();
-            const data = await api(`/api/message/${encodeURIComponent(state.roomCode)}`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ text, user_id: state.user.id, message_type: 'text' }),
-            });
+            const data = await postMessage({ t: 'text', text });
             input.value = '';
             autoResize();
-            addMessage(data.message, true);
+            receiveMessage(data.message, true);
         } catch (err) {
             showToast(`Failed to send message: ${err.message}`, 'danger');
         }
+    }
+
+    /** Text or location. With a room key the server only gets "<key id>.<iv>.<ciphertext>". */
+    async function postMessage(content) {
+        const body = { user_id: state.user.id };
+        if (state.keys) {
+            body.message_type = 'sealed';
+            body.data = await C.seal(state.keys, 'msg', content);
+        } else if (content.t === 'location') {
+            Object.assign(body, { message_type: 'location', latitude: content.latitude, longitude: content.longitude });
+        } else {
+            Object.assign(body, { message_type: 'text', text: content.text });
+        }
+        return api(`/api/message/${encodeURIComponent(state.roomCode)}`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+        });
     }
 
     function sendLocation() {
@@ -672,15 +921,8 @@
         navigator.geolocation.getCurrentPosition(async (pos) => {
             try {
                 await ensureJoined();
-                const data = await api(`/api/message/${encodeURIComponent(state.roomCode)}`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        user_id: state.user.id, message_type: 'location',
-                        latitude: pos.coords.latitude, longitude: pos.coords.longitude,
-                    }),
-                });
-                addMessage(data.message, true);
+                const data = await postMessage({ t: 'location', latitude: pos.coords.latitude, longitude: pos.coords.longitude });
+                receiveMessage(data.message, true);
                 showToast('Location shared!', 'success', 2500);
             } catch (err) {
                 showToast(`Failed to share location: ${err.message}`, 'danger');
@@ -690,15 +932,26 @@
         }, { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 });
     }
 
-    function uploadOne(file, type, onProgress) {
+    async function uploadOne(file, type, onProgress) {
+        let body = file, name = file.name, query = `&message_type=${encodeURIComponent(type)}`;
+        if (state.keys) {
+            // Encrypt on the device. Name, type and size go along sealed; the server sees "encrypted" bytes.
+            const mime = file.type || 'application/octet-stream';
+            const meta = await C.seal(state.keys, 'meta', { name: file.name.slice(0, 150), type: mime, size: file.size, kind: classify(mime, type) });
+            body = await C.encryptFile(state.keys, file, (fraction) => onProgress(fraction * 0.3, 'Encrypting'));
+            name = 'encrypted';
+            query = `&enc=1&meta=${encodeURIComponent(meta)}`;
+            if (state.upload.cancelled) throw Object.assign(new Error('cancelled'), { cancelled: true });
+        }
+        const base = state.keys ? 0.3 : 0;
         return new Promise((resolve, reject) => {
             const xhr = new XMLHttpRequest();
             state.upload.xhr = xhr;
             const form = new FormData();
-            form.append('files', file, file.name);
-            const url = `/api/upload/${encodeURIComponent(state.roomCode)}?user_id=${encodeURIComponent(state.user.id)}&message_type=${encodeURIComponent(type)}`;
+            form.append('files', body, name);
+            const url = `/api/upload/${encodeURIComponent(state.roomCode)}?user_id=${encodeURIComponent(state.user.id)}${query}`;
             xhr.open('POST', url);
-            xhr.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(e.loaded / e.total); };
+            xhr.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(base + (1 - base) * (e.loaded / e.total)); };
             xhr.onload = () => {
                 let data = null;
                 try { data = JSON.parse(xhr.responseText); } catch { /* ignore */ }
@@ -719,9 +972,10 @@
             showToast('Please wait until the current upload has finished', 'warning');
             return;
         }
-        const tooLarge = files.filter((f) => f.size > MAX_FILE_SIZE);
+        const wireSize = (f) => (state.keys ? C.encryptedSize(f.size) : f.size);
+        const tooLarge = files.filter((f) => wireSize(f) > MAX_FILE_SIZE);
         const empty = files.filter((f) => f.size === 0);
-        const valid = files.filter((f) => f.size > 0 && f.size <= MAX_FILE_SIZE);
+        const valid = files.filter((f) => f.size > 0 && wireSize(f) <= MAX_FILE_SIZE);
         tooLarge.forEach((f) => showToast(`${f.name} is too large (max ${formatSize(MAX_FILE_SIZE)})`, 'danger', 6000));
         empty.forEach((f) => showToast(`${f.name} is empty`, 'warning'));
         if (!valid.length) return;
@@ -736,16 +990,16 @@
         try {
             for (let i = 0; i < valid.length && !state.upload.cancelled; i++) {
                 const file = valid[i];
-                const label = valid.length > 1 ? `Uploading ${i + 1}/${valid.length}: ${file.name}` : `Uploading ${file.name}`;
-                const progress = (fraction) => {
+                const label = valid.length > 1 ? `${i + 1}/${valid.length}: ${file.name}` : file.name;
+                const progress = (fraction, verb = 'Uploading') => {
                     const pct = total ? Math.round(((sent + file.size * fraction) / total) * 100) : 100;
-                    $('uploadStatusText').textContent = `${label} – ${pct}%`;
+                    $('uploadStatusText').textContent = `${verb} ${label} – ${pct}%`;
                     $('uploadBarFill').style.width = `${pct}%`;
                 };
                 progress(0);
                 try {
                     const data = await uploadOne(file, type, progress);
-                    (data?.files || []).forEach((f) => addMessage(f.message, true));
+                    (data?.files || []).forEach((f) => receiveMessage(f.message, true));
                     ok++;
                 } catch (err) {
                     if (err.cancelled) break;
@@ -859,7 +1113,11 @@
         const promise = fetch(downloadUrl(id)).then((r) => {
             if (!r.ok) throw new Error(`HTTP ${r.status}`);
             return r.blob();
-        }).then((blob) => {
+        }).then(async (blob) => {
+            if (msg.enc) {
+                if (!state.keys) throw new Error('room key missing');
+                blob = await C.decryptFile(state.keys, blob, msg.mime);
+            }
             const file = new File([blob], msg.filename, { type: msg.mime || blob.type || 'application/octet-stream' });
             state.fileReady.set(id, file);
             return file;
@@ -909,12 +1167,110 @@
         }
         if (items.length === 1) {
             const [msg] = items;
-            if (isFileMsg(msg)) triggerDownload(downloadUrl(msg.id), msg.filename);
-            else downloadText(msg);
+            if (!isFileMsg(msg)) downloadText(msg);
+            else if (msg.enc) {
+                showToast(`Decrypting ${msg.filename}…`, 'info', 2000);
+                objectUrl(msg.id).then((url) => triggerDownload(url, msg.filename))
+                    .catch((err) => showToast(`Download failed: ${err.message}`, 'danger'));
+            } else triggerDownload(downloadUrl(msg.id), msg.filename);
+            return;
+        }
+        if (items.some(isPrivate)) {
+            // The server cannot read encrypted items, so the archive is built on this device.
+            downloadLocalZip(items);
             return;
         }
         triggerDownload(zipUrl(items.map((m) => m.id)));
         showToast(`Downloading ${items.length} items as ZIP…`, 'info', 3000);
+    }
+
+    async function downloadLocalZip(items) {
+        const size = items.reduce((n, m) => n + (isFileMsg(m) ? m.size : 0), 0);
+        if (size > PREFETCH_LIMIT) {
+            showToast(`Too large for one archive (${formatSize(size)}). Download the files one by one.`, 'warning', 6000);
+            return;
+        }
+        showToast(`Preparing ${items.length} items…`, 'info', 3000);
+        try {
+            const entries = await Promise.all(items.map(async (m) => (isFileMsg(m)
+                ? { name: m.filename, blob: await fetchFile(m.id) }
+                : { name: textFilename(m), blob: new Blob([textForShare(m) + '\n'], { type: 'text/plain;charset=utf-8' }) })));
+            const url = URL.createObjectURL(await buildZip(entries));
+            const d = new Date(), p = (n) => String(n).padStart(2, '0');
+            triggerDownload(url, `FileRoom-${state.roomCode}-${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}.zip`);
+            setTimeout(() => URL.revokeObjectURL(url), 60000);
+        } catch (err) {
+            showToast(`Download failed: ${err.message}`, 'danger');
+        }
+    }
+
+    // ----- ZIP archive built in the browser (stored, no compression) ---------
+    const CRC_TABLE = (() => {
+        const table = new Uint32Array(256);
+        for (let n = 0; n < 256; n++) {
+            let c = n;
+            for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1;
+            table[n] = c >>> 0;
+        }
+        return table;
+    })();
+    async function crc32(blob) {
+        let crc = 0xFFFFFFFF;
+        for (let pos = 0; pos < blob.size; pos += 4 * 1024 * 1024) {
+            const bytes = new Uint8Array(await blob.slice(pos, pos + 4 * 1024 * 1024).arrayBuffer());
+            for (let i = 0; i < bytes.length; i++) crc = CRC_TABLE[(crc ^ bytes[i]) & 0xFF] ^ (crc >>> 8);
+        }
+        return (crc ^ 0xFFFFFFFF) >>> 0;
+    }
+    function uniqueName(name, used) {
+        const dot = name.lastIndexOf('.');
+        const stem = dot > 0 ? name.slice(0, dot) : name, ext = dot > 0 ? name.slice(dot) : '';
+        let candidate = name;
+        for (let n = 2; used.has(candidate.toLowerCase()); n++) candidate = `${stem} (${n})${ext}`;
+        used.add(candidate.toLowerCase());
+        return candidate;
+    }
+    async function buildZip(entries) {
+        const encoder = new TextEncoder();
+        const d = new Date();
+        const time = (d.getHours() << 11) | (d.getMinutes() << 5) | (d.getSeconds() >> 1);
+        const date = ((d.getFullYear() - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate();
+        const used = new Set(), files = [], directory = [];
+        let offset = 0;
+        for (const { name, blob } of entries) {
+            const nameBytes = encoder.encode(uniqueName(name.replace(/[\\/]/g, '_'), used));
+            const crc = await crc32(blob);
+            const common = (view, at) => {             // fields shared by the local and the central header
+                view.setUint16(at, 0x0800, true);      // UTF-8 file names
+                view.setUint16(at + 2, 0, true);       // stored
+                view.setUint16(at + 4, time, true);
+                view.setUint16(at + 6, date, true);
+                view.setUint32(at + 8, crc, true);
+                view.setUint32(at + 12, blob.size, true);
+                view.setUint32(at + 16, blob.size, true);
+                view.setUint16(at + 20, nameBytes.length, true);
+            };
+            const local = new DataView(new ArrayBuffer(30));
+            local.setUint32(0, 0x04034b50, true);
+            local.setUint16(4, 20, true);
+            common(local, 6);
+            const central = new DataView(new ArrayBuffer(46));
+            central.setUint32(0, 0x02014b50, true);
+            central.setUint16(4, 20, true);
+            central.setUint16(6, 20, true);
+            common(central, 8);
+            central.setUint32(42, offset, true);
+            files.push(local, nameBytes, blob);
+            directory.push(central, nameBytes);
+            offset += 30 + nameBytes.length + blob.size;
+        }
+        const end = new DataView(new ArrayBuffer(22));
+        end.setUint32(0, 0x06054b50, true);
+        end.setUint16(8, entries.length, true);
+        end.setUint16(10, entries.length, true);
+        end.setUint32(12, directory.reduce((n, part) => n + part.byteLength, 0), true);
+        end.setUint32(16, offset, true);
+        return new Blob([...files, ...directory, end], { type: 'application/zip' });
     }
 
     function zipUrl(ids) {
@@ -1067,12 +1423,36 @@
     function hideAttachMenu() { $('attachMenu').classList.remove('show'); }
 
     function openQR() {
-        const url = location.origin + roomUrl(state.roomCode);
+        const url = inviteUrl();
         $('shareUrl').value = url;
         $('qrRoomCode').textContent = state.roomCode;
-        $('qrImage').src = `/api/qr?data=${encodeURIComponent(url)}`;
+        // Drawn on the device: the link may contain the room key, which must not be sent to the server.
+        const svg = window.FileRoomQR?.svg(url);
+        $('qrImage').classList.toggle('d-none', !svg && Boolean(state.secret));
+        if (svg) $('qrImage').src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+        else if (!state.secret) $('qrImage').src = `/api/qr?data=${encodeURIComponent(url)}`;
+        $('qrHint').textContent = state.secret
+            ? (svg ? 'This code and link contain the room key. Show them only to people who should be able to read along.'
+                : 'The link is too long for a QR code. Share the link instead – it contains the room key.')
+            : 'This room has no key: anyone who knows its name can read along.';
         $('shareUrlBtn').classList.toggle('d-none', !CAN_SHARE);
         $('qrModal').classList.add('show');
+    }
+
+    function closeKeyModal() {
+        $('keyModal').classList.remove('show');
+        $('keyInput').value = '';
+    }
+
+    async function submitPassword() {
+        const password = $('keyInput').value.trim();
+        if ([...password].length < 6) {
+            showToast('Use at least 6 characters – longer is better, the room name is not a secret.', 'warning', 5000);
+            return;
+        }
+        await setSecret(password);
+        closeKeyModal();
+        if (state.keys) showToast('Room key set. Devices that enter the same password can read along.', 'success', 5000);
     }
 
     function renderRecentRooms() {
@@ -1103,16 +1483,35 @@
         location.href = roomUrl(code);
     }
 
-    async function changeName() {
-        const name = prompt('Enter your name:', state.user?.name || '');
-        if (!name || !name.trim()) return;
+    function openProfile() {
+        const profile = getProfile();
+        $('profileName').value = profile.name || '';
+        $('profilePublic').checked = profile.name ? profile.public : true;
+        window.fileroomContacts?.render();
+        $('profileModal').classList.add('show');
+    }
+
+    async function saveProfile() {
+        const before = getProfile();
+        const name = $('profileName').value.trim().slice(0, 20);
+        const isPublic = Boolean(name) && $('profilePublic').checked;
+        storage.set('fileroom_profile', { name, public: isPublic, mod: Date.now() });
+        $('profileModal').classList.remove('show');
         try {
-            const user = await joinRoom(name.trim());
-            showToast(`You are now ${user.name}`, 'success', 2500);
+            if (isPublic) {
+                const user = await joinRoom(name);
+                showToast(`You are now ${user.name} – in this and every other room`, 'success', 3500);
+            } else {
+                // Stop showing the old name here, too.
+                if (before.public && state.user?.name === before.name) await joinRoom(null, { anonymous: true });
+                showToast(name ? `Only known devices see "${name}". Everyone else sees ${state.user?.name || 'a random name'}.`
+                    : 'Anonymous: a random name in every room', 'success', 4500);
+            }
             refreshData();
         } catch (err) {
             showToast(`Could not change name: ${err.message}`, 'danger');
         }
+        emit('profile');
     }
 
     async function deleteAll() {
@@ -1166,13 +1565,29 @@
         'share-url': () => navigator.share?.({ title: `FileRoom ${state.roomCode}`, url: $('shareUrl').value }).catch(() => {}),
         'open-room-change': openRoomChange,
         'close-room-change': closeRoomChange,
-        'new-room': () => { location.href = roomUrl(randomRoomCode()); },
+        'new-room': () => { location.href = `${roomUrl(randomRoomCode())}?new=1`; },
         'go-room': (el) => goToRoom(el.dataset.room),
-        'change-name': changeName,
+        'change-name': openProfile,
+        'close-profile': () => $('profileModal').classList.remove('show'),
         'delete-all': deleteAll,
         'download-all': () => {
             if (!state.messages.size) return showToast('Nothing in this room', 'info');
-            triggerDownload(zipUrl());
+            downloadMessages(domOrder());
+        },
+        'load-media': (el) => loadMedia(el.dataset.id),
+        'open-key': () => { updateKeyUi(); $('voiceModal')?.classList.remove('show'); $('keyModal').classList.add('show'); },
+        'close-key': closeKeyModal,
+        'copy-invite': () => copyText(inviteUrl()),
+        'key-random': async () => {
+            if (state.keys && !confirm('Replace the room key? Devices that have the old key must open the new invite link, and older encrypted messages become unreadable.')) return;
+            await setSecret(C.randomSecret());
+            closeKeyModal();
+            if (state.keys) openQR();
+        },
+        'key-remove': async () => {
+            if (!confirm('Remove the room key from this device? Encrypted messages become unreadable here and new messages are sent unencrypted.')) return;
+            await setSecret(null);
+            closeKeyModal();
         },
         'share-all': () => {
             const ids = allFileIds();
@@ -1253,16 +1668,25 @@
         voice.addEventListener('contextmenu', (e) => e.preventDefault());
 
         $('roomChangeForm').addEventListener('submit', (e) => { e.preventDefault(); goToRoom($('newRoomInput').value); });
+        $('keyForm').addEventListener('submit', (e) => { e.preventDefault(); submitPassword(); });
+        $('profileForm').addEventListener('submit', (e) => { e.preventDefault(); saveProfile(); });
+        // Opening another invite link for this room in the same tab only changes the fragment.
+        window.addEventListener('hashchange', () => {
+            const secret = secretFromHash();
+            if (secret && secret !== state.secret) setSecret(secret);
+        });
 
         document.addEventListener('keydown', (e) => {
             if (e.key !== 'Escape') return;
             closeImageModal();
             $('qrModal').classList.remove('show');
             closeRoomChange();
+            closeKeyModal();
+            $('profileModal').classList.remove('show');
             toggleSidebar(false);
             if (state.selectMode) setSelectMode(false);
         });
-        for (const id of ['qrModal', 'roomChangeModal']) {
+        for (const id of ['qrModal', 'roomChangeModal', 'keyModal', 'profileModal']) {
             $(id).addEventListener('click', (e) => { if (e.target === e.currentTarget) e.currentTarget.classList.remove('show'); });
         }
 
@@ -1314,7 +1738,28 @@
     }
 
     // Used by pwa.js before restarting for an update.
-    window.fileroomBusy = () => state.upload.active || Boolean(state.recording.recorder);
+    window.fileroomBusy = () => state.upload.active || Boolean(state.recording.recorder) || Boolean(window.fileroomVoice?.active());
+
+    // Interface for voice.js (calls and babyphone). Everything it sends through sendSignal() is an
+    // opaque string for the server, which passes it to one device (`to`) or to all others in the room.
+    window.fileroom = {
+        get roomCode() { return state.roomCode; },
+        get user() { return state.user; },
+        get users() { return state.users; },
+        get keys() { return state.keys; },
+        get secret() { return state.secret; },                 // for handing the key to a known device (contacts.js)
+        get profile() { return getProfile(); },
+        setSecret: (secret) => setSecret(secret),
+        renderUsers: () => updateUsersList(state.users),
+        get ready() { return state.ready; },
+        get online() { return state.ws?.readyState === WebSocket.OPEN; },
+        esc, serverNow, api, showToast, storage, ensureJoined, on, actions, inviteUrl,
+        sendSignal(to, data) {
+            if (state.ws?.readyState !== WebSocket.OPEN) return false;
+            state.ws.send(JSON.stringify({ type: 'signal', to: to || null, data }));
+            return true;
+        },
+    };
     window.addEventListener('beforeunload', (e) => {
         if (state.upload.active) { e.preventDefault(); e.returnValue = ''; }
     });
@@ -1322,13 +1767,35 @@
     // ======================================================================
     // Start
     // ======================================================================
-    function start() {
+    /** Content shared into FileRoom from another app, kept on this device by the service worker. */
+    async function sendPendingShare() {
+        const share = await window.FileRoomShareStore?.get();
+        if (!share) return;
+        await window.FileRoomShareStore.clear(); // taken: a reload must not send it twice
+        try {
+            await ensureJoined();
+            if (share.combinedText) {
+                const data = await postMessage({ t: 'text', text: share.combinedText.slice(0, 20000) });
+                receiveMessage(data.message, true);
+            }
+            if (share.files.length) await uploadFiles(share.files);
+            else showToast('Shared', 'success', 2000);
+        } catch (err) {
+            showToast(`Sharing failed: ${err.message}`, 'danger', 6000);
+        }
+    }
+
+    async function start() {
         resolveRoomCode();
         wireEvents();
+        const pendingShare = new URLSearchParams(location.search).get('share') === 'local';
+        await initKey(); // before the first message is decoded or sent
+        if (pendingShare) sendPendingShare();
         handleUrlNotices();
         updateEmptyState();
         refreshData();
         connect();
+        ensureJoined().then(() => { state.ready = true; emit('ready'); }).catch(() => {});
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start);

@@ -1,0 +1,10 @@
+.env
+.git
+.gitignore
+tests
+__pycache__
+.pytest_cache
+uploads
+*.md
+docker-compose*.yml
+nginx-example.conf

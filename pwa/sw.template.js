@@ -97,7 +97,13 @@ async function fromCache(path) {
 
 self.addEventListener('fetch', (event) => {
   const request = event.request;
-  if (request.method !== 'GET') return; // uploads, share target POST, deletes: network only
+  if (request.method === 'POST' && new URL(request.url).pathname === '/share') {
+    // Something was shared into FileRoom from another app. Keep it on the phone: the room page
+    // sends it afterwards, encrypted with the room key. Nothing is uploaded at this point.
+    event.respondWith(keepShare(request));
+    return;
+  }
+  if (request.method !== 'GET') return; // uploads, deletes: network only
   const url = new URL(request.url);
   if (url.origin !== self.location.origin) return; // map tiles etc.
   if (NETWORK_ONLY.some((prefix) => url.pathname === prefix || url.pathname.startsWith(prefix))) return;
@@ -130,3 +136,123 @@ self.addEventListener('fetch', (event) => {
     return fetch(request);
   })());
 });
+
+// ---------------------------------------------------------------------------
+// Babyphone alerts as Web Push. They are encrypted by the baby station for this phone only; the
+// browser decrypts them before this handler runs. Neither the FileRoom server nor the push service
+// can read them. A push is the fallback for a parent phone whose page is asleep or gone.
+// ---------------------------------------------------------------------------
+const PUSH_TEXT = {
+  noise: (name) => [`${name}: sound detected`, 'Tap to listen.'],
+  lost: (name) => [`Babyphone: connection to ${name} lost`, 'The baby station can no longer reach this phone. Tap to reconnect.'],
+  battery: (name) => [`${name}: battery low`, 'Connect the baby station to its charger.'],
+};
+
+self.addEventListener('push', (event) => event.waitUntil((async () => {
+  let data = {};
+  try { data = event.data ? event.data.json() : {}; } catch { /* not ours */ }
+  const room = typeof data.room === 'string' ? data.room.slice(0, 64) : '';
+  if (data.t === 'invite') return showInvite(data, room);
+  const name = String(data.name || 'Baby station').slice(0, 20);
+  const kind = PUSH_TEXT[data.k] ? data.k : 'noise';
+  const url = room ? `/room/${encodeURIComponent(room)}` : '/?source=pwa';
+  const clients = await self.clients.matchAll({ includeUncontrolled: true, type: 'window' });
+  // Wake pages that are still alive: the parent unit checks its connections right away.
+  for (const client of clients) client.postMessage({ type: 'VOICE_PUSH', kind, room });
+  // A parent unit that is on screen has already sounded its own alarm.
+  if (clients.some((client) => client.visibilityState === 'visible' && client.focused)) return;
+  const [title, body] = PUSH_TEXT[kind](name);
+  await self.registration.showNotification(title, {
+    body: room ? `${body} · room ${room}` : body,
+    tag: `fileroom-${kind === 'noise' ? 'baby' : kind}`,
+    renotify: true,
+    requireInteraction: true,
+    vibrate: [300, 120, 300, 120, 500],
+    icon: '/static/icons/icon-192x192.png',
+    badge: '/static/icons/icon-96x96.png',
+    timestamp: Number(data.at) || Date.now(),
+    data: { url },
+  });
+})()));
+
+/**
+ * A known device invites this one into a room. The sealed part (`d`) can only be opened - and its
+ * sender verified - by the page, which has this device's identity; nothing here is trusted.
+ */
+function inviteNotification(data, room) {
+  const invite = { room, name: String(data.name || 'A known device').slice(0, 20), d: String(data.d || '').slice(0, 4000) };
+  return {
+    invite,
+    title: `${invite.name} invites you to a room`,
+    options: {
+      body: `Room ${room} · tap to join`,
+      tag: `fileroom-invite-${room}`,
+      renotify: true,
+      vibrate: [200, 100, 200],
+      icon: '/static/icons/icon-192x192.png',
+      badge: '/static/icons/icon-96x96.png',
+      data: { url: `/room/${encodeURIComponent(room)}?invite=${encodeURIComponent(JSON.stringify(invite))}`, invite },
+    },
+  };
+}
+
+async function showInvite(data, room) {
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(room) || typeof data.d !== 'string') return;
+  const { invite, title, options } = inviteNotification(data, room);
+  const clients = await self.clients.matchAll({ includeUncontrolled: true, type: 'window' });
+  for (const client of clients) client.postMessage({ type: 'FILEROOM_INVITE', invite }); // open pages show a banner
+  if (clients.some((client) => client.visibilityState === 'visible' && client.focused)) return;
+  await self.registration.showNotification(title, options);
+}
+
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  const target = new URL(event.notification.data?.url || '/?source=pwa', self.location.origin);
+  const invite = event.notification.data?.invite;
+  event.waitUntil((async () => {
+    const clients = await self.clients.matchAll({ includeUncontrolled: true, type: 'window' });
+    if (invite && clients.length) {
+      // FileRoom is open (in whatever room): that page checks the invitation and switches rooms.
+      const client = clients.find((c) => c.visibilityState === 'visible') || clients[0];
+      client.postMessage({ type: 'FILEROOM_INVITE', invite, open: true });
+      return client.focus();
+    }
+    // Prefer the page that already has this room open: its babyphone session is still running.
+    const same = clients.find((client) => new URL(client.url).pathname === target.pathname) || null;
+    if (same) return same.focus();
+    return self.clients.openWindow(target.href);
+  })());
+});
+
+// ---------------------------------------------------------------------------
+// Share target: park shared text/links/files in IndexedDB (see static/js/share-store.js)
+// ---------------------------------------------------------------------------
+function storeShare(share) {
+  return new Promise((resolve, reject) => {
+    const open = indexedDB.open('fileroom-share', 1);
+    open.onupgradeneeded = () => open.result.createObjectStore('pending');
+    open.onerror = () => reject(open.error);
+    open.onsuccess = () => {
+      const db = open.result;
+      const tx = db.transaction('pending', 'readwrite');
+      tx.objectStore('pending').put(share, 'share');
+      tx.oncomplete = () => { db.close(); resolve(); };
+      tx.onerror = tx.onabort = () => { db.close(); reject(tx.error); };
+    };
+  });
+}
+
+async function keepShare(request) {
+  try {
+    const form = await request.formData();
+    const field = (name) => { const value = form.get(name); return typeof value === 'string' && value.trim() ? value.trim() : null; };
+    const files = form.getAll('files').filter((file) => file instanceof File && file.size > 0);
+    const share = { created: Date.now(), title: field('title'), text: field('text'), url: field('url'), files };
+    if (!share.title && !share.text && !share.url && !files.length) return Response.redirect('/?shareError=empty', 303);
+    await storeShare(share);
+    return Response.redirect('/?share=local', 303);
+  } catch (err) {
+    console.error('Share could not be kept on the device', err);
+    return Response.redirect('/?shareError=invalid', 303);
+  }
+}

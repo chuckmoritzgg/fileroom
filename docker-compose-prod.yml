@@ -1,0 +1,71 @@
+# FileRoom behind a dockerised nginx reverse proxy, with everything calls and the babyphone need.
+#
+#   docker compose -f docker-compose-prod.yml --env-file .env up -d --build --remove-orphans
+#
+# All settings come from .env (copy .env.example). Nothing in this file needs editing.
+#
+#   fileroom  the app. Reached by nginx as http://fileroom:8000 on the shared network.
+#             Uploaded files are stored on DISK (volume "fileroom_uploads"), never in RAM.
+#   coturn    STUN/TURN for calls between phones in different networks (parent on mobile data,
+#             baby station on the home Wi-Fi). Uses the host's network: clients talk to it directly,
+#             NOT through nginx. Open in the firewall: TURN_PORT udp+tcp, TURN_MIN_PORT-TURN_MAX_PORT udp.
+services:
+  fileroom:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    mem_limit: ${FILEROOM_MEM_LIMIT:-256m}
+    environment:
+      - MAX_FILE_SIZE=${MAX_FILE_SIZE:-104857600}
+      - MAX_SHARE_SIZE=${MAX_SHARE_SIZE:-524288000}
+      - MAX_STORAGE_SIZE=${MAX_STORAGE_SIZE:-2147483648}
+      - MESSAGE_EXPIRY_HOURS=${MESSAGE_EXPIRY_HOURS:-1}
+      - USER_TIMEOUT_SECONDS=${USER_TIMEOUT_SECONDS:-60}
+      - MAX_ROOM_CODE_LENGTH=${MAX_ROOM_CODE_LENGTH:-64}
+      - PUSH_RELAY=${PUSH_RELAY:-1}
+      # ICE servers handed to the phones (the coturn service below)
+      - STUN_URLS=stun:${TURN_HOST:?Set TURN_HOST in .env}:${TURN_PORT:-3478}
+      - TURN_URLS=turn:${TURN_HOST}:${TURN_PORT:-3478},turn:${TURN_HOST}:${TURN_PORT:-3478}?transport=tcp
+      - TURN_SECRET=${TURN_SECRET:?Set TURN_SECRET in .env (openssl rand -hex 32)}
+    volumes:
+      - fileroom_uploads:/app/uploads          # disk; emptied by the app on every start
+    networks:
+      - fileroom_network
+
+  coturn:
+    image: coturn/coturn:4.6-alpine
+    network_mode: host                         # a relay needs a UDP port range; no docker-proxy per port
+    restart: unless-stopped
+    mem_limit: 96m
+    environment:
+      - TURN_SECRET=${TURN_SECRET}
+      - TURN_REALM=${DOMAIN:?Set DOMAIN in .env}
+      - TURN_PORT=${TURN_PORT:-3478}
+      - TURN_MIN_PORT=${TURN_MIN_PORT:-49160}
+      - TURN_MAX_PORT=${TURN_MAX_PORT:-49200}
+      - TURN_EXTERNAL_IP=${TURN_EXTERNAL_IP:-}
+    entrypoint: ["/bin/sh", "-c"]
+    # $$ = a literal $ for the shell inside the container. --external-ip is only added if it is set.
+    command:
+      - |
+        exec turnserver -n --log-file=stdout \
+          --listening-port="$$TURN_PORT" --min-port="$$TURN_MIN_PORT" --max-port="$$TURN_MAX_PORT" \
+          --realm="$$TURN_REALM" --use-auth-secret --static-auth-secret="$$TURN_SECRET" \
+          --fingerprint --stale-nonce=600 \
+          --max-bps=16000 --user-quota=8 --total-quota=40 \
+          --no-cli --no-tls --no-dtls --no-tcp-relay --no-multicast-peers \
+          --denied-peer-ip=0.0.0.0-0.255.255.255 --denied-peer-ip=10.0.0.0-10.255.255.255 \
+          --denied-peer-ip=100.64.0.0-100.127.255.255 --denied-peer-ip=127.0.0.0-127.255.255.255 \
+          --denied-peer-ip=169.254.0.0-169.254.255.255 --denied-peer-ip=172.16.0.0-172.31.255.255 \
+          --denied-peer-ip=192.168.0.0-192.168.255.255 --denied-peer-ip=::1 \
+          --denied-peer-ip=fc00::-fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff \
+          --denied-peer-ip=fe80::-febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff \
+          $${TURN_EXTERNAL_IP:+--external-ip="$$TURN_EXTERNAL_IP"}
+
+volumes:
+  fileroom_uploads:
+
+networks:
+  fileroom_network:
+    external: true                             # the bridge network shared with the nginx container
